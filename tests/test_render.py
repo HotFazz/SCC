@@ -1,9 +1,8 @@
 from scc.domain import EdgeKind, GraphEdge, GraphNode, GraphSnapshot, NodeKind
-from scc.layout import LayoutResult
 from scc.render import AsciiGraphRenderer
 
 
-def test_renderer_outputs_readable_flow_tree() -> None:
+def test_renderer_outputs_board_cards_and_connections() -> None:
     snapshot = GraphSnapshot()
     snapshot.upsert_node(GraphNode(id="team:demo", kind=NodeKind.TEAM, label="demo", cluster="demo"))
     snapshot.upsert_node(
@@ -51,14 +50,53 @@ def test_renderer_outputs_readable_flow_tree() -> None:
     snapshot.add_edge(GraphEdge(source="agent:demo:lead", target="turn:model-1", kind=EdgeKind.PRODUCED))
     snapshot.add_edge(GraphEdge(source="task:demo:1", target="agent:demo:worker", kind=EdgeKind.ASSIGNED))
 
-    document = AsciiGraphRenderer(max_line_length=80).render(
+    document = AsciiGraphRenderer(lane_width=26).render(
         snapshot,
-        LayoutResult("graphviz", 0.0, 0.0, {}, {}),
         selected_node_id="turn:model-1",
     )
 
-    assert "Flow view: recent swarm activity grouped by team and agent." in document.text
-    assert "[T] demo" in document.text
-    assert "[A] team-lead [claude-opus]" in document.text
-    assert "[K] #1 Inspect repository [in_progress] -> worker" in document.text
-    assert "* [M] I will inspect the repository and report back." in document.text
+    assert "Board view: demo board" in document.text
+    assert "Requests" in document.text
+    assert "Lead" in document.text
+    assert "Tasks" in document.text
+    assert "Workers" in document.text
+    assert "Summaries" in document.text
+    assert "R1 Recent user" in document.text
+    assert "L1 team-lead" in document.text
+    assert "T1 #1 Inspect" in document.text
+    assert "W1 worker" in document.text
+    assert "-->" in document.text
+    assert "Relation Notes" in document.text
+
+
+def test_renderer_resets_card_ids_between_renders() -> None:
+    snapshot = GraphSnapshot()
+    snapshot.upsert_node(GraphNode(id="team:demo", kind=NodeKind.TEAM, label="demo", cluster="demo"))
+    snapshot.upsert_node(
+        GraphNode(
+            id="agent:demo:lead",
+            kind=NodeKind.AGENT,
+            label="team-lead",
+            cluster="demo",
+            metadata={"agent_type": "team-lead"},
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="turn:user-1",
+            kind=NodeKind.USER_REQUEST,
+            label="Inspect the repo.",
+            cluster="demo",
+            timestamp="2026-03-14T10:00:00Z",
+        )
+    )
+    snapshot.add_edge(GraphEdge(source="turn:user-1", target="agent:demo:lead", kind=EdgeKind.ROUTED_TO))
+
+    renderer = AsciiGraphRenderer(lane_width=24)
+    first = renderer.render(snapshot).text
+    second = renderer.render(snapshot).text
+
+    assert "R1 Recent user" in first
+    assert "R1 Recent user" in second
+    assert "L1 team-lead" in first
+    assert "L1 team-lead" in second

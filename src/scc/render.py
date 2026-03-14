@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from textwrap import wrap
 
-from scc.domain import EdgeKind, GraphNode, GraphSnapshot, NodeKind
-from scc.layout import LayoutResult
+from scc.board import BoardBuilder, BoardCard, BoardConnection, BoardModel, BoardRow, LANE_ORDER, LANE_TITLES
+from scc.domain import GraphSnapshot
 
 
 @dataclass(slots=True)
@@ -16,288 +17,284 @@ class GraphDocument:
 
 
 @dataclass(slots=True)
-class FlowEntry:
-    label: str
-    node_id: str | None = None
-    children: list["FlowEntry"] = field(default_factory=list)
+class CardPlacement:
+    row_index: int
+    lane: str
 
 
 class AsciiGraphRenderer:
-    def __init__(self, max_line_length: int = 92, recent_turn_limit: int = 6) -> None:
-        self.max_line_length = max_line_length
-        self.recent_turn_limit = recent_turn_limit
+    def __init__(self, lane_width: int = 28, gutter_width: int = 7, max_body_lines: int = 5) -> None:
+        self.lane_width = lane_width
+        self.gutter_width = gutter_width
+        self.max_body_lines = max_body_lines
+        self.builder = BoardBuilder()
 
     def render(
         self,
         snapshot: GraphSnapshot,
-        layout: LayoutResult,
         selected_node_id: str | None = None,
     ) -> GraphDocument:
         if not snapshot.nodes:
             return GraphDocument("No graph data available for the current focus.", 44, 1)
 
-        entries = self._build_entries(snapshot, selected_node_id)
-        if not entries:
+        board = self.builder.build(snapshot, selected_node_id=selected_node_id)
+        if not board.rows:
             return GraphDocument("No graph data available for the current focus.", 44, 1)
 
-        lines = ["Flow view: recent swarm activity grouped by team and agent.", ""]
-        for index, entry in enumerate(entries):
-            self._append_entry(lines, entry, prefixes=[], is_last=index == len(entries) - 1, selected_node_id=selected_node_id)
-            if index != len(entries) - 1:
+        placements = self._placements(board)
+        lines = [
+            f"Board view: {board.title}",
+            "",
+            self._lane_header(),
+            self._lane_rule(),
+        ]
+        for row_index, row in enumerate(board.rows):
+            lines.extend(self._render_row(row_index, row, board, placements))
+            if row_index < len(board.rows) - 1:
+                connector_gap = self._render_gap(row_index, board, placements)
+                lines.extend(connector_gap or [""])
+            else:
                 lines.append("")
+
+        offboard = self._offboard_connections(board, placements)
+        lines.append("Relation Notes")
+        lines.append("--------------")
+        for connection in offboard[:18]:
+            lines.append(
+                self._shorten(
+                    f"{connection.source_id} {self._arrow(connection.kind)} {connection.target_id}  {connection.label}"
+                )
+            )
+        if not offboard:
+            lines.append("All primary flows are visible in the board.")
+        elif len(offboard) > 18:
+            lines.append(f"... {len(offboard) - 18} more relationships hidden")
 
         width = max(len(line) for line in lines) if lines else 0
         return GraphDocument("\n".join(lines), width=width, height=len(lines))
 
-    def _build_entries(self, snapshot: GraphSnapshot, selected_node_id: str | None) -> list[FlowEntry]:
-        turns_by_agent: dict[str, list[GraphNode]] = defaultdict(list)
-        assignees_by_task: dict[str, list[str]] = defaultdict(list)
-        blockers_by_task: dict[str, list[str]] = defaultdict(list)
-
-        for edge in snapshot.edges:
-            if edge.kind == EdgeKind.ROUTED_TO and edge.target in snapshot.nodes and edge.source in snapshot.nodes:
-                if snapshot.nodes[edge.source].kind == NodeKind.USER_REQUEST and snapshot.nodes[edge.target].kind == NodeKind.AGENT:
-                    turns_by_agent[edge.target].append(snapshot.nodes[edge.source])
-            if edge.kind == EdgeKind.PRODUCED and edge.source in snapshot.nodes and edge.target in snapshot.nodes:
-                if snapshot.nodes[edge.source].kind == NodeKind.AGENT and snapshot.nodes[edge.target].kind == NodeKind.MODEL_TURN:
-                    turns_by_agent[edge.source].append(snapshot.nodes[edge.target])
-            if edge.kind == EdgeKind.ASSIGNED and edge.source in snapshot.nodes and edge.target in snapshot.nodes:
-                if snapshot.nodes[edge.source].kind == NodeKind.TASK and snapshot.nodes[edge.target].kind == NodeKind.AGENT:
-                    assignees_by_task[edge.source].append(edge.target)
-            if edge.kind == EdgeKind.BLOCKED_BY:
-                blockers_by_task[edge.target].append(edge.source)
-
-        teams = sorted(
-            (node for node in snapshot.nodes.values() if node.kind == NodeKind.TEAM),
-            key=lambda item: item.label,
+    def _lane_header(self) -> str:
+        return self._join_columns(
+            [title.center(self.lane_width) for title in (LANE_TITLES[lane] for lane in LANE_ORDER)]
         )
-        if teams:
-            return [
-                self._render_team(snapshot, team, turns_by_agent, assignees_by_task, blockers_by_task, selected_node_id)
-                for team in teams
-            ]
 
-        sessions = sorted({node.session_id for node in snapshot.nodes.values() if node.session_id})
-        if sessions:
-            return [
-                self._render_session(snapshot, session_id, turns_by_agent, selected_node_id)
-                for session_id in sessions
-            ]
+    def _lane_rule(self) -> str:
+        return self._join_columns(["=" * self.lane_width for _ in LANE_ORDER])
 
-        agents = sorted(
-            (node for node in snapshot.nodes.values() if node.kind == NodeKind.AGENT),
-            key=lambda item: item.label,
-        )
-        return [
-            self._render_agent(snapshot, agent, turns_by_agent, selected_node_id)
-            for agent in agents
-        ]
-
-    def _render_team(
+    def _render_row(
         self,
-        snapshot: GraphSnapshot,
-        team: GraphNode,
-        turns_by_agent: dict[str, list[GraphNode]],
-        assignees_by_task: dict[str, list[str]],
-        blockers_by_task: dict[str, list[str]],
-        selected_node_id: str | None,
-    ) -> FlowEntry:
-        root = FlowEntry(label=f"[T] {team.label}", node_id=team.id)
-        agents = self._team_agents(snapshot, team.label)
-        lead = next((agent for agent in agents if self._is_lead(agent)), None)
-        workers = [agent for agent in agents if agent.id != getattr(lead, "id", None)]
-        tasks = self._team_tasks(snapshot, team.label)
+        row_index: int,
+        row: BoardRow,
+        board: BoardModel,
+        placements: dict[str, CardPlacement],
+    ) -> list[str]:
+        rendered = {
+            lane: self._render_card(row.cells[lane], board.selected_card_id == row.cells[lane].card_id)
+            for lane in LANE_ORDER
+            if lane in row.cells
+        }
+        row_height = max((len(lines) for lines in rendered.values()), default=0)
+        if row_height == 0:
+            return []
+        padded = {
+            lane: lines + [" " * self.lane_width] * (row_height - len(lines))
+            for lane, lines in rendered.items()
+        }
+        output = []
+        for index in range(row_height):
+            parts = []
+            for lane_index, lane in enumerate(LANE_ORDER):
+                parts.append(padded.get(lane, [" " * self.lane_width] * row_height)[index])
+                if lane_index < len(LANE_ORDER) - 1:
+                    next_lane = LANE_ORDER[lane_index + 1]
+                    parts.append(
+                        self._gutter(
+                            row_index,
+                            row,
+                            lane,
+                            next_lane,
+                            board,
+                            placements,
+                            index,
+                            row_height,
+                        )
+                    )
+            output.append("".join(parts).rstrip())
+        return output
 
-        if lead is not None:
-            lead_entry = self._render_agent(snapshot, lead, turns_by_agent, selected_node_id)
-            lead_entry.children.extend(
-                self._render_task(snapshot, task, assignees_by_task, blockers_by_task)
-                for task in tasks
-            )
-            lead_entry.children.extend(
-                self._render_agent(snapshot, worker, turns_by_agent, selected_node_id)
-                for worker in workers
-            )
-            root.children.append(lead_entry)
-        else:
-            root.children.extend(
-                self._render_agent(snapshot, agent, turns_by_agent, selected_node_id)
-                for agent in agents
-            )
-            root.children.extend(
-                self._render_task(snapshot, task, assignees_by_task, blockers_by_task)
-                for task in tasks
-            )
+    def _render_card(self, card: BoardCard, selected: bool) -> list[str]:
+        corner = "#" if selected else "+"
+        horizontal = "#" if selected else "-"
+        vertical = "#" if selected else "|"
+        inner_width = self.lane_width - 4
+        title = self._shorten(f"{card.card_id} {card.title}", inner_width)
+        subtitle = self._shorten(card.subtitle or "", inner_width)
+        body = self._wrap_body(card.body_lines, inner_width)
+        if not body:
+            body = [""]
+        lines = [corner + horizontal * (self.lane_width - 2) + corner]
+        lines.append(f"{vertical} {title.ljust(inner_width)} {vertical}")
+        lines.append(f"{vertical} {subtitle.ljust(inner_width)} {vertical}")
+        for line in body:
+            lines.append(f"{vertical} {line.ljust(inner_width)} {vertical}")
+        lines.append(corner + horizontal * (self.lane_width - 2) + corner)
+        return lines
 
-        if not root.children:
-            root.children.append(FlowEntry(label="(no visible agents or tasks)"))
-        return root
-
-    def _render_session(
+    def _gutter(
         self,
-        snapshot: GraphSnapshot,
-        session_id: str,
-        turns_by_agent: dict[str, list[GraphNode]],
-        selected_node_id: str | None,
-    ) -> FlowEntry:
-        root = FlowEntry(label=f"[S] session {session_id[:8]}", node_id=None)
-        agents = sorted(
-            (
-                node
-                for node in snapshot.nodes.values()
-                if node.kind == NodeKind.AGENT and node.session_id == session_id
-            ),
-            key=lambda item: item.label,
-        )
-        root.children.extend(
-            self._render_agent(snapshot, agent, turns_by_agent, selected_node_id)
-            for agent in agents
-        )
-        if not root.children:
-            loose_turns = sorted(
-                (
-                    node
-                    for node in snapshot.nodes.values()
-                    if node.session_id == session_id and node.kind in {NodeKind.USER_REQUEST, NodeKind.MODEL_TURN}
-                ),
-                key=self._node_sort_key,
-            )[-self.recent_turn_limit :]
-            root.children.extend(self._render_turn(node) for node in loose_turns)
-        return root
+        row_index: int,
+        row: BoardRow,
+        left_lane: str,
+        right_lane: str,
+        board: BoardModel,
+        placements: dict[str, CardPlacement],
+        line_index: int,
+        row_height: int,
+    ) -> str:
+        left = row.cells.get(left_lane)
+        right = row.cells.get(right_lane)
+        direct = self._direct_connection(board, left, right)
+        incoming = self._incoming_connection(board, placements, row_index, left_lane, right)
+        if line_index != row_height // 2:
+            return " " * self.gutter_width
+        if direct:
+            return self._arrow(direct.kind).center(self.gutter_width)
+        if incoming:
+            return self._arrow(incoming.kind).center(self.gutter_width)
+        return " " * self.gutter_width
 
-    def _render_agent(
+    def _render_gap(
         self,
-        snapshot: GraphSnapshot,
-        agent: GraphNode,
-        turns_by_agent: dict[str, list[GraphNode]],
-        selected_node_id: str | None,
-    ) -> FlowEntry:
-        suffix = []
-        if agent.status:
-            suffix.append(agent.status)
-        model = str(agent.metadata.get("model", "")).strip()
-        if model and model not in {"None", ""}:
-            suffix.append(model)
-        label = f"[A] {agent.label}"
-        if suffix:
-            label += f" [{' | '.join(suffix)}]"
+        row_index: int,
+        board: BoardModel,
+        placements: dict[str, CardPlacement],
+    ) -> list[str]:
+        columns = [" " * self.lane_width]
+        for lane_index, left_lane in enumerate(LANE_ORDER[:-1]):
+            right_lane = LANE_ORDER[lane_index + 1]
+            columns.append(self._gap_gutter(row_index, left_lane, right_lane, board, placements))
+            columns.append(" " * self.lane_width)
+        return [self._join_parts(columns).rstrip()]
 
-        entry = FlowEntry(label=label, node_id=agent.id)
-        turns = sorted(
-            {turn.id: turn for turn in turns_by_agent.get(agent.id, [])}.values(),
-            key=self._node_sort_key,
-        )
-
-        if turns:
-            visible = self._visible_turns(turns, selected_node_id)
-            hidden_count = max(0, len(turns) - len(visible))
-            if hidden_count:
-                entry.children.append(FlowEntry(label=f"... {hidden_count} earlier turns hidden"))
-            entry.children.extend(self._render_turn(turn) for turn in visible)
-        else:
-            entry.children.append(FlowEntry(label="(no recent turns)"))
-        return entry
-
-    def _render_task(
+    def _gap_gutter(
         self,
-        snapshot: GraphSnapshot,
-        task: GraphNode,
-        assignees_by_task: dict[str, list[str]],
-        blockers_by_task: dict[str, list[str]],
-    ) -> FlowEntry:
-        status = task.status or "unknown"
-        assignee_labels = [
-            snapshot.nodes[agent_id].label
-            for agent_id in assignees_by_task.get(task.id, [])
-            if agent_id in snapshot.nodes
-        ]
-        label = f"[K] {task.label} [{status}]"
-        if assignee_labels:
-            label += f" -> {', '.join(sorted(assignee_labels))}"
-        entry = FlowEntry(label=label, node_id=task.id)
+        row_index: int,
+        left_lane: str,
+        right_lane: str,
+        board: BoardModel,
+        placements: dict[str, CardPlacement],
+    ) -> str:
+        for connection in board.connections:
+            source = placements.get(connection.source_id)
+            target = placements.get(connection.target_id)
+            if not source or not target:
+                continue
+            if source.lane != left_lane or target.lane != right_lane:
+                continue
+            if source.row_index <= row_index < target.row_index:
+                return "|".center(self.gutter_width)
+        return " " * self.gutter_width
 
-        blocker_labels = [
-            snapshot.nodes[task_id].label
-            for task_id in blockers_by_task.get(task.id, [])
-            if task_id in snapshot.nodes
-        ]
-        if blocker_labels:
-            entry.children.append(
-                FlowEntry(label=f"blocked by: {', '.join(sorted(blocker_labels))}")
-            )
-        return entry
+    def _arrow(self, kind: str) -> str:
+        if kind == "blocked":
+            return "-x>"
+        return "-->"
 
-    def _render_turn(self, node: GraphNode) -> FlowEntry:
-        prefix = "[U]" if node.kind == NodeKind.USER_REQUEST else "[M]"
-        return FlowEntry(label=f"{prefix} {node.label}", node_id=node.id)
+    def _wrap_body(self, lines: list[str], width: int) -> list[str]:
+        wrapped: list[str] = []
+        truncated = False
+        for line in lines:
+            chunks = wrap(line, width=width, break_long_words=True, break_on_hyphens=False) or [""]
+            for chunk in chunks:
+                if len(wrapped) == self.max_body_lines:
+                    truncated = True
+                    break
+                wrapped.append(chunk)
+            if truncated:
+                break
+        if truncated and wrapped:
+            wrapped[-1] = self._shorten(wrapped[-1], width)
+        return wrapped
 
-    def _visible_turns(self, turns: list[GraphNode], selected_node_id: str | None) -> list[GraphNode]:
-        if len(turns) <= self.recent_turn_limit:
-            return turns
-
-        visible = turns[-self.recent_turn_limit :]
-        if selected_node_id:
-            selected = next((turn for turn in turns if turn.id == selected_node_id), None)
-            if selected and all(turn.id != selected.id for turn in visible):
-                visible = visible[1:] + [selected]
-                visible = sorted(visible, key=self._node_sort_key)
-        return visible
-
-    def _append_entry(
-        self,
-        lines: list[str],
-        entry: FlowEntry,
-        prefixes: list[bool],
-        is_last: bool,
-        selected_node_id: str | None,
-    ) -> None:
-        marker = "* " if entry.node_id == selected_node_id else "  "
-        if prefixes:
-            branch = "".join("|  " if has_more else "   " for has_more in prefixes[:-1])
-            connector = "`- " if is_last else "|- "
-            raw = f"{branch}{connector}{marker}{entry.label}"
-        else:
-            raw = f"{marker}{entry.label}"
-        lines.append(self._shorten(raw))
-
-        for index, child in enumerate(entry.children):
-            self._append_entry(
-                lines,
-                child,
-                prefixes + [not is_last],
-                is_last=index == len(entry.children) - 1,
-                selected_node_id=selected_node_id,
-            )
-
-    def _team_agents(self, snapshot: GraphSnapshot, team_name: str) -> list[GraphNode]:
-        return sorted(
-            (
-                node
-                for node in snapshot.nodes.values()
-                if node.kind == NodeKind.AGENT and node.cluster == team_name
-            ),
-            key=lambda item: (not self._is_lead(item), item.label),
-        )
-
-    def _team_tasks(self, snapshot: GraphSnapshot, team_name: str) -> list[GraphNode]:
-        return sorted(
-            (
-                node
-                for node in snapshot.nodes.values()
-                if node.kind == NodeKind.TASK and node.cluster == team_name
-            ),
-            key=lambda item: (item.status == "completed", item.label),
-        )
-
-    def _is_lead(self, agent: GraphNode) -> bool:
-        return agent.label == "team-lead" or agent.metadata.get("agent_type") == "team-lead"
-
-    def _node_sort_key(self, node: GraphNode) -> tuple[str, str]:
-        return (node.timestamp or "", node.id)
-
-    def _shorten(self, text: str) -> str:
-        if len(text) <= self.max_line_length:
+    def _shorten(self, text: str, width: int | None = None) -> str:
+        max_width = width if width is not None else self.lane_width - 4
+        if len(text) <= max_width:
             return text
-        if self.max_line_length <= 3:
-            return text[: self.max_line_length]
-        return text[: self.max_line_length - 3].rstrip() + "..."
+        if max_width <= 3:
+            return text[:max_width]
+        return text[: max_width - 3].rstrip() + "..."
+
+    def _join_columns(self, columns: list[str]) -> str:
+        separator = " " * self.gutter_width
+        return separator.join(columns)
+
+    def _join_parts(self, parts: Iterable[str]) -> str:
+        return "".join(parts)
+
+    def _placements(self, board: BoardModel) -> dict[str, CardPlacement]:
+        placements: dict[str, CardPlacement] = {}
+        for row_index, row in enumerate(board.rows):
+            for lane, card in row.cells.items():
+                placements[card.card_id] = CardPlacement(row_index=row_index, lane=lane)
+        return placements
+
+    def _direct_connection(
+        self,
+        board: BoardModel,
+        left: BoardCard | None,
+        right: BoardCard | None,
+    ) -> BoardConnection | None:
+        if not left or not right:
+            return None
+        return next(
+            (
+                connection
+                for connection in board.connections
+                if connection.source_id == left.card_id and connection.target_id == right.card_id
+            ),
+            None,
+        )
+
+    def _incoming_connection(
+        self,
+        board: BoardModel,
+        placements: dict[str, CardPlacement],
+        row_index: int,
+        left_lane: str,
+        right: BoardCard | None,
+    ) -> BoardConnection | None:
+        if not right:
+            return None
+        for connection in board.connections:
+            if connection.target_id != right.card_id:
+                continue
+            source = placements.get(connection.source_id)
+            if not source:
+                continue
+            if source.lane == left_lane and source.row_index < row_index:
+                return connection
+        return None
+
+    def _offboard_connections(
+        self,
+        board: BoardModel,
+        placements: dict[str, CardPlacement],
+    ) -> list[BoardConnection]:
+        offboard: list[BoardConnection] = []
+        for connection in board.connections:
+            source = placements.get(connection.source_id)
+            target = placements.get(connection.target_id)
+            if not source or not target:
+                continue
+            if target.row_index == source.row_index and self._lane_distance(source.lane, target.lane) == 1:
+                continue
+            if source.lane == target.lane:
+                offboard.append(connection)
+                continue
+            if target.row_index > source.row_index and self._lane_distance(source.lane, target.lane) == 1:
+                continue
+            offboard.append(connection)
+        return offboard
+
+    def _lane_distance(self, source_lane: str, target_lane: str) -> int:
+        return abs(LANE_ORDER.index(source_lane) - LANE_ORDER.index(target_lane))

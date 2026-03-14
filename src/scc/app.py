@@ -13,7 +13,6 @@ from watchfiles import watch
 
 from scc.claude_cli import ClaudeCLIClient, ClaudeCommandResult
 from scc.domain import GraphSnapshot
-from scc.layout import AutoLayoutEngine, LayoutResult
 from scc.loader import ClaudeStateLoader
 from scc.render import AsciiGraphRenderer
 from scc.view import FocusOption, FocusedSnapshot, build_focus_options, focus_snapshot, pick_default_node
@@ -98,7 +97,6 @@ class SCCApp(App[None]):
         self.claude_home = Path(claude_home).expanduser()
         self.workspace = Path(workspace).expanduser()
         self.loader = ClaudeStateLoader(self.claude_home)
-        self.layout_engine = AutoLayoutEngine()
         self.renderer = AsciiGraphRenderer()
         self.claude = ClaudeCLIClient()
         self.snapshot = GraphSnapshot()
@@ -107,7 +105,6 @@ class SCCApp(App[None]):
             snapshot=GraphSnapshot(),
             events=[],
         )
-        self.layout_result = LayoutResult("layered", 0.0, 0.0, {}, {})
         self.selected_node_id: str | None = None
         self.focus_value = "all"
         self.status_line = "Loading Claude state..."
@@ -132,7 +129,7 @@ class SCCApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#graph-scroll", ScrollableContainer).border_title = "Swarm Flow"
+        self.query_one("#graph-scroll", ScrollableContainer).border_title = "Swarm Board"
         self.query_one("#timeline", ListView).border_title = "Timeline"
         self.query_one("#inspector", Static).border_title = "Inspector"
         self.load_snapshot()
@@ -189,7 +186,6 @@ class SCCApp(App[None]):
         self._visible_events = self.focused_view.events
         if self.selected_node_id not in self.focused_view.snapshot.nodes:
             self.selected_node_id = pick_default_node(self.focused_view.snapshot)
-        self.layout_result = self.layout_engine.layout(self.focused_view.snapshot)
         self._render_graph()
         self._render_timeline()
         self._render_inspector()
@@ -198,7 +194,6 @@ class SCCApp(App[None]):
     def _render_graph(self) -> None:
         document = self.renderer.render(
             self.focused_view.snapshot,
-            self.layout_result,
             selected_node_id=self.selected_node_id,
         )
         self.query_one("#graph", Static).update(document.text)
@@ -248,9 +243,8 @@ class SCCApp(App[None]):
     def _render_summary(self) -> None:
         summary = self.query_one("#summary", Static)
         lines = [
-            f"{self.focused_view.focus.label} | nodes {len(self.focused_view.snapshot.nodes)} | "
-            f"edges {len(self.focused_view.snapshot.edges)} | events {len(self._visible_events)} | "
-            f"layout {self.layout_result.engine}",
+            f"{self.focused_view.focus.label} | board view | nodes {len(self.focused_view.snapshot.nodes)} | "
+            f"edges {len(self.focused_view.snapshot.edges)} | events {len(self._visible_events)}",
             self.status_line,
         ]
         if self.last_command_result is not None:
