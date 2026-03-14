@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 
-from scc.domain import GraphSnapshot, NodeKind
-from scc.layout import LayoutResult, NodePlacement
+from scc.domain import EdgeKind, GraphNode, GraphSnapshot, NodeKind
+from scc.layout import LayoutResult
 
 
 @dataclass(slots=True)
@@ -14,10 +15,17 @@ class GraphDocument:
     boxes: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class FlowEntry:
+    label: str
+    node_id: str | None = None
+    children: list["FlowEntry"] = field(default_factory=list)
+
+
 class AsciiGraphRenderer:
-    def __init__(self, scale_x: int = 4, scale_y: int = 2) -> None:
-        self.scale_x = scale_x
-        self.scale_y = scale_y
+    def __init__(self, max_line_length: int = 92, recent_turn_limit: int = 6) -> None:
+        self.max_line_length = max_line_length
+        self.recent_turn_limit = recent_turn_limit
 
     def render(
         self,
@@ -25,128 +33,271 @@ class AsciiGraphRenderer:
         layout: LayoutResult,
         selected_node_id: str | None = None,
     ) -> GraphDocument:
-        if not snapshot.nodes or not layout.node_positions:
+        if not snapshot.nodes:
             return GraphDocument("No graph data available for the current focus.", 44, 1)
 
-        boxes = self._build_boxes(snapshot, layout)
-        if not boxes:
-            return GraphDocument("Layout produced no renderable node boxes.", 40, 1)
-        width = max(left + box_width for left, _, box_width, _ in boxes.values()) + 2
-        height = max(top + box_height for _, top, _, box_height in boxes.values()) + 2
-        canvas = [[" " for _ in range(width)] for _ in range(height)]
+        entries = self._build_entries(snapshot, selected_node_id)
+        if not entries:
+            return GraphDocument("No graph data available for the current focus.", 44, 1)
 
-        for edge_key, edge in layout.edge_paths.items():
-            points = edge.points
-            if len(points) < 2:
-                continue
-            previous = self._point_to_cell(points[0], layout)
-            for point in points[1:]:
-                current = self._point_to_cell(point, layout)
-                self._draw_segment(canvas, previous, current)
-                previous = current
+        lines = ["Flow view: recent swarm activity grouped by team and agent.", ""]
+        for index, entry in enumerate(entries):
+            self._append_entry(lines, entry, prefixes=[], is_last=index == len(entries) - 1, selected_node_id=selected_node_id)
+            if index != len(entries) - 1:
+                lines.append("")
 
-        for node_id, node in snapshot.nodes.items():
-            if node_id not in boxes:
-                continue
-            left, top, box_width, box_height = boxes[node_id]
-            label = self._display_label(node.kind, node.label, box_width - 2)
-            border = "*" if node_id == selected_node_id else "+"
-            horizontal = "*" if node_id == selected_node_id else "-"
-            vertical = "*" if node_id == selected_node_id else "|"
-            self._draw_box(canvas, left, top, box_width, box_height, border, horizontal, vertical)
-            label_row = top + box_height // 2
-            label_col = left + max(1, (box_width - len(label)) // 2)
-            for index, char in enumerate(label):
-                canvas[label_row][label_col + index] = char
+        width = max(len(line) for line in lines) if lines else 0
+        return GraphDocument("\n".join(lines), width=width, height=len(lines))
 
-        lines = ["".join(row).rstrip() for row in canvas]
-        while lines and not lines[-1]:
-            lines.pop()
+    def _build_entries(self, snapshot: GraphSnapshot, selected_node_id: str | None) -> list[FlowEntry]:
+        turns_by_agent: dict[str, list[GraphNode]] = defaultdict(list)
+        assignees_by_task: dict[str, list[str]] = defaultdict(list)
+        blockers_by_task: dict[str, list[str]] = defaultdict(list)
 
-        return GraphDocument("\n".join(lines), width=width, height=len(lines), boxes=boxes)
+        for edge in snapshot.edges:
+            if edge.kind == EdgeKind.ROUTED_TO and edge.target in snapshot.nodes and edge.source in snapshot.nodes:
+                if snapshot.nodes[edge.source].kind == NodeKind.USER_REQUEST and snapshot.nodes[edge.target].kind == NodeKind.AGENT:
+                    turns_by_agent[edge.target].append(snapshot.nodes[edge.source])
+            if edge.kind == EdgeKind.PRODUCED and edge.source in snapshot.nodes and edge.target in snapshot.nodes:
+                if snapshot.nodes[edge.source].kind == NodeKind.AGENT and snapshot.nodes[edge.target].kind == NodeKind.MODEL_TURN:
+                    turns_by_agent[edge.source].append(snapshot.nodes[edge.target])
+            if edge.kind == EdgeKind.ASSIGNED and edge.source in snapshot.nodes and edge.target in snapshot.nodes:
+                if snapshot.nodes[edge.source].kind == NodeKind.TASK and snapshot.nodes[edge.target].kind == NodeKind.AGENT:
+                    assignees_by_task[edge.source].append(edge.target)
+            if edge.kind == EdgeKind.BLOCKED_BY:
+                blockers_by_task[edge.target].append(edge.source)
 
-    def _build_boxes(
+        teams = sorted(
+            (node for node in snapshot.nodes.values() if node.kind == NodeKind.TEAM),
+            key=lambda item: item.label,
+        )
+        if teams:
+            return [
+                self._render_team(snapshot, team, turns_by_agent, assignees_by_task, blockers_by_task, selected_node_id)
+                for team in teams
+            ]
+
+        sessions = sorted({node.session_id for node in snapshot.nodes.values() if node.session_id})
+        if sessions:
+            return [
+                self._render_session(snapshot, session_id, turns_by_agent, selected_node_id)
+                for session_id in sessions
+            ]
+
+        agents = sorted(
+            (node for node in snapshot.nodes.values() if node.kind == NodeKind.AGENT),
+            key=lambda item: item.label,
+        )
+        return [
+            self._render_agent(snapshot, agent, turns_by_agent, selected_node_id)
+            for agent in agents
+        ]
+
+    def _render_team(
         self,
         snapshot: GraphSnapshot,
-        layout: LayoutResult,
-    ) -> dict[str, tuple[int, int, int, int]]:
-        boxes: dict[str, tuple[int, int, int, int]] = {}
-        for node_id, placement in layout.node_positions.items():
-            if node_id not in snapshot.nodes:
-                continue
-            label = self._display_label(snapshot.nodes[node_id].kind, snapshot.nodes[node_id].label, 999)
-            box_width = max(len(label) + 2, int(placement.width * self.scale_x) + 4)
-            box_height = max(3, int(placement.height * self.scale_y))
-            left = max(0, int((placement.x - placement.width / 2) * self.scale_x))
-            top = max(0, int((layout.height - placement.y - placement.height / 2) * self.scale_y))
-            boxes[node_id] = (left, top, box_width, box_height)
-        return boxes
+        team: GraphNode,
+        turns_by_agent: dict[str, list[GraphNode]],
+        assignees_by_task: dict[str, list[str]],
+        blockers_by_task: dict[str, list[str]],
+        selected_node_id: str | None,
+    ) -> FlowEntry:
+        root = FlowEntry(label=f"[T] {team.label}", node_id=team.id)
+        agents = self._team_agents(snapshot, team.label)
+        lead = next((agent for agent in agents if self._is_lead(agent)), None)
+        workers = [agent for agent in agents if agent.id != getattr(lead, "id", None)]
+        tasks = self._team_tasks(snapshot, team.label)
 
-    def _point_to_cell(
-        self,
-        point: tuple[float, float],
-        layout: LayoutResult,
-    ) -> tuple[int, int]:
-        x, y = point
-        return int(x * self.scale_x), int((layout.height - y) * self.scale_y)
+        if lead is not None:
+            lead_entry = self._render_agent(snapshot, lead, turns_by_agent, selected_node_id)
+            lead_entry.children.extend(
+                self._render_task(snapshot, task, assignees_by_task, blockers_by_task)
+                for task in tasks
+            )
+            lead_entry.children.extend(
+                self._render_agent(snapshot, worker, turns_by_agent, selected_node_id)
+                for worker in workers
+            )
+            root.children.append(lead_entry)
+        else:
+            root.children.extend(
+                self._render_agent(snapshot, agent, turns_by_agent, selected_node_id)
+                for agent in agents
+            )
+            root.children.extend(
+                self._render_task(snapshot, task, assignees_by_task, blockers_by_task)
+                for task in tasks
+            )
 
-    def _draw_segment(
+        if not root.children:
+            root.children.append(FlowEntry(label="(no visible agents or tasks)"))
+        return root
+
+    def _render_session(
         self,
-        canvas: list[list[str]],
-        start: tuple[int, int],
-        end: tuple[int, int],
+        snapshot: GraphSnapshot,
+        session_id: str,
+        turns_by_agent: dict[str, list[GraphNode]],
+        selected_node_id: str | None,
+    ) -> FlowEntry:
+        root = FlowEntry(label=f"[S] session {session_id[:8]}", node_id=None)
+        agents = sorted(
+            (
+                node
+                for node in snapshot.nodes.values()
+                if node.kind == NodeKind.AGENT and node.session_id == session_id
+            ),
+            key=lambda item: item.label,
+        )
+        root.children.extend(
+            self._render_agent(snapshot, agent, turns_by_agent, selected_node_id)
+            for agent in agents
+        )
+        if not root.children:
+            loose_turns = sorted(
+                (
+                    node
+                    for node in snapshot.nodes.values()
+                    if node.session_id == session_id and node.kind in {NodeKind.USER_REQUEST, NodeKind.MODEL_TURN}
+                ),
+                key=self._node_sort_key,
+            )[-self.recent_turn_limit :]
+            root.children.extend(self._render_turn(node) for node in loose_turns)
+        return root
+
+    def _render_agent(
+        self,
+        snapshot: GraphSnapshot,
+        agent: GraphNode,
+        turns_by_agent: dict[str, list[GraphNode]],
+        selected_node_id: str | None,
+    ) -> FlowEntry:
+        suffix = []
+        if agent.status:
+            suffix.append(agent.status)
+        model = str(agent.metadata.get("model", "")).strip()
+        if model and model not in {"None", ""}:
+            suffix.append(model)
+        label = f"[A] {agent.label}"
+        if suffix:
+            label += f" [{' | '.join(suffix)}]"
+
+        entry = FlowEntry(label=label, node_id=agent.id)
+        turns = sorted(
+            {turn.id: turn for turn in turns_by_agent.get(agent.id, [])}.values(),
+            key=self._node_sort_key,
+        )
+
+        if turns:
+            visible = self._visible_turns(turns, selected_node_id)
+            hidden_count = max(0, len(turns) - len(visible))
+            if hidden_count:
+                entry.children.append(FlowEntry(label=f"... {hidden_count} earlier turns hidden"))
+            entry.children.extend(self._render_turn(turn) for turn in visible)
+        else:
+            entry.children.append(FlowEntry(label="(no recent turns)"))
+        return entry
+
+    def _render_task(
+        self,
+        snapshot: GraphSnapshot,
+        task: GraphNode,
+        assignees_by_task: dict[str, list[str]],
+        blockers_by_task: dict[str, list[str]],
+    ) -> FlowEntry:
+        status = task.status or "unknown"
+        assignee_labels = [
+            snapshot.nodes[agent_id].label
+            for agent_id in assignees_by_task.get(task.id, [])
+            if agent_id in snapshot.nodes
+        ]
+        label = f"[K] {task.label} [{status}]"
+        if assignee_labels:
+            label += f" -> {', '.join(sorted(assignee_labels))}"
+        entry = FlowEntry(label=label, node_id=task.id)
+
+        blocker_labels = [
+            snapshot.nodes[task_id].label
+            for task_id in blockers_by_task.get(task.id, [])
+            if task_id in snapshot.nodes
+        ]
+        if blocker_labels:
+            entry.children.append(
+                FlowEntry(label=f"blocked by: {', '.join(sorted(blocker_labels))}")
+            )
+        return entry
+
+    def _render_turn(self, node: GraphNode) -> FlowEntry:
+        prefix = "[U]" if node.kind == NodeKind.USER_REQUEST else "[M]"
+        return FlowEntry(label=f"{prefix} {node.label}", node_id=node.id)
+
+    def _visible_turns(self, turns: list[GraphNode], selected_node_id: str | None) -> list[GraphNode]:
+        if len(turns) <= self.recent_turn_limit:
+            return turns
+
+        visible = turns[-self.recent_turn_limit :]
+        if selected_node_id:
+            selected = next((turn for turn in turns if turn.id == selected_node_id), None)
+            if selected and all(turn.id != selected.id for turn in visible):
+                visible = visible[1:] + [selected]
+                visible = sorted(visible, key=self._node_sort_key)
+        return visible
+
+    def _append_entry(
+        self,
+        lines: list[str],
+        entry: FlowEntry,
+        prefixes: list[bool],
+        is_last: bool,
+        selected_node_id: str | None,
     ) -> None:
-        start_x, start_y = start
-        end_x, end_y = end
-        if start_x == end_x:
-            for row in range(min(start_y, end_y), max(start_y, end_y) + 1):
-                canvas[row][start_x] = "|" if canvas[row][start_x] == " " else "+"
-            return
+        marker = "* " if entry.node_id == selected_node_id else "  "
+        if prefixes:
+            branch = "".join("|  " if has_more else "   " for has_more in prefixes[:-1])
+            connector = "`- " if is_last else "|- "
+            raw = f"{branch}{connector}{marker}{entry.label}"
+        else:
+            raw = f"{marker}{entry.label}"
+        lines.append(self._shorten(raw))
 
-        if start_y == end_y:
-            for column in range(min(start_x, end_x), max(start_x, end_x) + 1):
-                canvas[start_y][column] = "-" if canvas[start_y][column] == " " else "+"
-            return
+        for index, child in enumerate(entry.children):
+            self._append_entry(
+                lines,
+                child,
+                prefixes + [not is_last],
+                is_last=index == len(entry.children) - 1,
+                selected_node_id=selected_node_id,
+            )
 
-        corner = (end_x, start_y)
-        self._draw_segment(canvas, start, corner)
-        self._draw_segment(canvas, corner, end)
+    def _team_agents(self, snapshot: GraphSnapshot, team_name: str) -> list[GraphNode]:
+        return sorted(
+            (
+                node
+                for node in snapshot.nodes.values()
+                if node.kind == NodeKind.AGENT and node.cluster == team_name
+            ),
+            key=lambda item: (not self._is_lead(item), item.label),
+        )
 
-    def _draw_box(
-        self,
-        canvas: list[list[str]],
-        left: int,
-        top: int,
-        box_width: int,
-        box_height: int,
-        corner: str,
-        horizontal: str,
-        vertical: str,
-    ) -> None:
-        right = left + box_width - 1
-        bottom = top + box_height - 1
-        for column in range(left + 1, right):
-            canvas[top][column] = horizontal
-            canvas[bottom][column] = horizontal
-        for row in range(top + 1, bottom):
-            canvas[row][left] = vertical
-            canvas[row][right] = vertical
-        canvas[top][left] = corner
-        canvas[top][right] = corner
-        canvas[bottom][left] = corner
-        canvas[bottom][right] = corner
+    def _team_tasks(self, snapshot: GraphSnapshot, team_name: str) -> list[GraphNode]:
+        return sorted(
+            (
+                node
+                for node in snapshot.nodes.values()
+                if node.kind == NodeKind.TASK and node.cluster == team_name
+            ),
+            key=lambda item: (item.status == "completed", item.label),
+        )
 
-    def _display_label(self, kind: NodeKind, label: str, width: int) -> str:
-        prefix = {
-            NodeKind.TEAM: "T",
-            NodeKind.AGENT: "A",
-            NodeKind.USER_REQUEST: "U",
-            NodeKind.MODEL_TURN: "M",
-            NodeKind.TASK: "K",
-        }[kind]
-        text = f"{prefix}: {label}"
-        if len(text) <= width:
+    def _is_lead(self, agent: GraphNode) -> bool:
+        return agent.label == "team-lead" or agent.metadata.get("agent_type") == "team-lead"
+
+    def _node_sort_key(self, node: GraphNode) -> tuple[str, str]:
+        return (node.timestamp or "", node.id)
+
+    def _shorten(self, text: str) -> str:
+        if len(text) <= self.max_line_length:
             return text
-        if width <= 4:
-            return text[:width]
-        return text[: width - 3].rstrip() + "..."
+        if self.max_line_length <= 3:
+            return text[: self.max_line_length]
+        return text[: self.max_line_length - 3].rstrip() + "..."

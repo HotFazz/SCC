@@ -121,10 +121,10 @@ class SCCApp(App[None]):
         yield Select([("Loading...", "all")], allow_blank=False, value="all", id="focus")
         with Horizontal(id="main"):
             with ScrollableContainer(id="graph-scroll"):
-                yield Static(id="graph")
+                yield Static(id="graph", markup=False)
             with Vertical(id="sidebar"):
                 yield ListView(id="timeline")
-                yield Static("Select a node or event to inspect details.", id="inspector")
+                yield Static("Select a node or event to inspect details.", id="inspector", markup=False)
         with Horizontal(id="composer"):
             yield Input(placeholder="Send a prompt through Claude Code", id="prompt")
             yield Button("Send", id="send")
@@ -132,7 +132,7 @@ class SCCApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#graph-scroll", ScrollableContainer).border_title = "Graph"
+        self.query_one("#graph-scroll", ScrollableContainer).border_title = "Swarm Flow"
         self.query_one("#timeline", ListView).border_title = "Timeline"
         self.query_one("#inspector", Static).border_title = "Inspector"
         self.load_snapshot()
