@@ -42,10 +42,7 @@ class QueryFlowBuilder:
         selected_node_id: str | None = None,
     ) -> QueryFlowModel:
         self._counters.clear()
-        requests = sorted(
-            (node for node in snapshot.nodes.values() if node.kind == NodeKind.USER_REQUEST),
-            key=self._node_sort_key,
-        )[-self.request_limit :]
+        requests = self._section_requests(snapshot)
         primary = self._primary_agent(snapshot)
         all_cards: list[BoardCard] = []
 
@@ -75,6 +72,25 @@ class QueryFlowBuilder:
             sections=sections,
             selected_card_id=self._selected_card_id(all_cards, selected_node_id),
         )
+
+    def _section_requests(self, snapshot: GraphSnapshot) -> list[GraphNode]:
+        requests = [
+            node
+            for node in snapshot.nodes.values()
+            if node.kind == NodeKind.USER_REQUEST
+        ]
+        primary = [
+            node
+            for node in requests
+            if not node.metadata.get("is_sidechain")
+            and str(node.metadata.get("speaker") or "You") == "You"
+        ]
+        visible = primary or [
+            node
+            for node in requests
+            if not node.metadata.get("is_sidechain")
+        ] or requests
+        return sorted(visible, key=self._node_sort_key)[-self.request_limit :]
 
     def _build_section(
         self,

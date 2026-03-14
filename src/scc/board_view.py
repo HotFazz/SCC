@@ -88,8 +88,15 @@ class BoardCardWidget(Vertical):
 
     can_focus = True
 
-    def __init__(self, card: BoardCard, selected: bool = False) -> None:
+    def __init__(
+        self,
+        card: BoardCard,
+        selected: bool = False,
+        extra_classes: str = "",
+    ) -> None:
         classes = f"board-card lane-{card.lane}"
+        if extra_classes:
+            classes += f" {extra_classes}"
         if selected:
             classes += " is-selected"
         super().__init__(classes=classes, id=f"card-{card.card_id}")
@@ -154,8 +161,7 @@ class QuerySectionWidget(Vertical):
     }
 
     QuerySectionWidget .request-wrap {
-      width: 52;
-      min-width: 40;
+      height: auto;
     }
 
     QuerySectionWidget .cluster-shell {
@@ -167,13 +173,10 @@ class QuerySectionWidget(Vertical):
 
     QuerySectionWidget .cluster-main {
       height: auto;
-      min-height: 16;
     }
 
     QuerySectionWidget .lead-wrap {
-      width: 32;
-      min-width: 28;
-      margin-right: 2;
+      height: auto;
     }
 
     QuerySectionWidget .workers-strip {
@@ -192,8 +195,26 @@ class QuerySectionWidget(Vertical):
     }
 
     QuerySectionWidget .final-wrap {
+      height: auto;
+    }
+
+    QuerySectionWidget .request-card {
+      width: 52;
+      min-width: 40;
+      height: auto;
+    }
+
+    QuerySectionWidget .lead-card {
+      width: 32;
+      min-width: 28;
+      height: auto;
+      margin-right: 2;
+    }
+
+    QuerySectionWidget .final-card {
       width: 64;
       min-width: 48;
+      height: auto;
     }
     """
 
@@ -204,20 +225,20 @@ class QuerySectionWidget(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="request-row"):
-            with Vertical(classes="request-wrap"):
-                yield BoardCardWidget(
-                    self.section.request_card,
-                    selected=self.selected_card_id == self.section.request_card.card_id,
-                )
+            yield BoardCardWidget(
+                self.section.request_card,
+                selected=self.selected_card_id == self.section.request_card.card_id,
+                extra_classes="request-card",
+            )
 
         with Vertical(classes="cluster-shell"):
             with Horizontal(classes="cluster-main"):
-                with Vertical(classes="lead-wrap"):
-                    if self.section.lead_card is not None:
-                        yield BoardCardWidget(
-                            self.section.lead_card,
-                            selected=self.selected_card_id == self.section.lead_card.card_id,
-                        )
+                if self.section.lead_card is not None:
+                    yield BoardCardWidget(
+                        self.section.lead_card,
+                        selected=self.selected_card_id == self.section.lead_card.card_id,
+                        extra_classes="lead-card",
+                    )
                 with Horizontal(classes="workers-strip"):
                     if self.section.worker_flows:
                         for flow in self.section.worker_flows:
@@ -226,11 +247,11 @@ class QuerySectionWidget(Vertical):
                         yield Static("No delegated work in this query window.", classes="empty-workers")
             if self.section.final_card is not None:
                 with Horizontal(classes="cluster-footer"):
-                    with Vertical(classes="final-wrap"):
-                        yield BoardCardWidget(
-                            self.section.final_card,
-                            selected=self.selected_card_id == self.section.final_card.card_id,
-                        )
+                    yield BoardCardWidget(
+                        self.section.final_card,
+                        selected=self.selected_card_id == self.section.final_card.card_id,
+                        extra_classes="final-card",
+                    )
 
 
 class SwarmBoard(Vertical):

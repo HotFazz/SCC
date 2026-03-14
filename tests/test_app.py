@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from scc.app import SCCApp
+from scc.board_view import BoardCardWidget
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -103,3 +104,98 @@ async def test_app_renders_board_cards_for_team_focus(tmp_path: Path) -> None:
         await pilot.pause()
         cards = list(app.query(".board-card"))
         assert len(cards) >= 3
+
+
+@pytest.mark.anyio
+async def test_app_keeps_lead_card_visible_under_request_in_session_focus(tmp_path: Path) -> None:
+    claude_home = tmp_path / ".claude"
+    write_jsonl(
+        claude_home / "projects/workspace/session-1.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "user-1",
+                "parentUuid": None,
+                "sessionId": "session-1",
+                "timestamp": "2026-03-14T09:59:00Z",
+                "cwd": "/tmp/demo",
+                "message": {"role": "user", "content": "Whip up a swarm to inspect the repo."},
+            },
+            {
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "parentUuid": "user-1",
+                "sessionId": "session-1",
+                "timestamp": "2026-03-14T09:59:05Z",
+                "cwd": "/tmp/demo",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Agent: Explore domain model"}],
+                },
+            },
+            {
+                "type": "assistant",
+                "uuid": "assistant-2",
+                "parentUuid": "assistant-1",
+                "sessionId": "session-1",
+                "timestamp": "2026-03-14T09:59:20Z",
+                "cwd": "/tmp/demo",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Here's what the swarm found."}],
+                },
+            },
+        ],
+    )
+    write_jsonl(
+        claude_home / "projects/workspace/session-1/subagents/agent-worker.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "sub-user-1",
+                "parentUuid": None,
+                "sessionId": "session-1",
+                "agentId": "runtime-worker",
+                "isSidechain": True,
+                "timestamp": "2026-03-14T09:59:06Z",
+                "cwd": "/tmp/demo",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        '<teammate-message teammate_id="team-lead" summary="Inspect repo">'
+                        "Research only (no edits). Read the repo."
+                        "</teammate-message>"
+                    ),
+                },
+            },
+            {
+                "type": "assistant",
+                "uuid": "sub-assistant-1",
+                "parentUuid": "sub-user-1",
+                "sessionId": "session-1",
+                "agentId": "runtime-worker",
+                "isSidechain": True,
+                "timestamp": "2026-03-14T09:59:12Z",
+                "cwd": "/tmp/demo",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Repo structure complete."}],
+                },
+            },
+        ],
+    )
+
+    app = SCCApp(claude_home=claude_home, workspace=tmp_path)
+    async with app.run_test(size=(180, 48)) as pilot:
+        await pilot.pause()
+        app.focus_value = "session:session-1"
+        app._refresh_focus()
+        await pilot.pause()
+
+        request_card = app.query_one("#card-Q1", BoardCardWidget)
+        lead_card = app.query_one("#card-L1", BoardCardWidget)
+        worker_card = app.query_one("#card-W1", BoardCardWidget)
+
+        assert request_card.region.y < lead_card.region.y
+        assert lead_card.region.y - request_card.region.y < 20
+        assert worker_card.region.y - request_card.region.y < 30
