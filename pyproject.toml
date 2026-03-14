@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scc"
+version = "0.1.0"
+description = "Swarm Central Control for Claude Code"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "networkx>=3.3",
+  "textual>=1.0.0",
+  "watchfiles>=0.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+]
+
+[project.scripts]
+scc = "scc.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
