@@ -124,6 +124,7 @@ class QueryFlowBuilder:
         final_turn = self._final_turn(lead_turns)
         lead_card = None
         if primary is not None:
+            has_swarm_activity = bool(worker_flows)
             lead_card = self._new_card(
                 lane="lead",
                 title=primary.label,
@@ -135,6 +136,7 @@ class QueryFlowBuilder:
                     final_turn=final_turn,
                 ),
                 node_ids={primary.id} | {turn.id for turn in lead_turns[-self.summary_limit :]},
+                max_body_lines=8 if has_swarm_activity else 4,
             )
             cards.append(lead_card)
 
@@ -450,6 +452,7 @@ class QueryFlowBuilder:
         body_lines: list[str],
         node_ids: set[str],
         card_id: str | None = None,
+        max_body_lines: int = 5,
     ) -> BoardCard:
         if card_id is None:
             prefix = {
@@ -469,6 +472,7 @@ class QueryFlowBuilder:
             subtitle=subtitle,
             body_lines=body_lines,
             node_ids=node_ids,
+            max_body_lines=max_body_lines,
         )
 
     def _agent_subtitle(self, agent: GraphNode) -> str:
@@ -492,21 +496,47 @@ class QueryFlowBuilder:
         if delegated:
             noun = "worker" if delegated == 1 else "workers"
             lines.append(f"delegated to {delegated} {noun}")
+            completed = sum(1 for flow in worker_flows if flow.summary_card is not None)
+            lines.append(f"reports: {completed}/{delegated}")
+            lines.extend(self._lead_activity_lines(lead_turns, final_turn, max_items=3))
         else:
             lines.append("working directly on this request")
 
         visible_turns = [turn for turn in lead_turns if not turn.label.startswith("Agent: ")]
-        if final_turn is not None and len(visible_turns) > 1:
+        if final_turn is not None and len(visible_turns) > 1 and not delegated:
             lines.append(visible_turns[-2].label)
         elif final_turn is not None:
             lines.append("response delivered")
-        elif visible_turns:
+        elif visible_turns and not delegated:
             lines.append(visible_turns[-1].label)
-        elif any(turn.label.startswith("Agent: ") for turn in lead_turns):
+        elif any(turn.label.startswith("Agent: ") for turn in lead_turns) and not delegated:
             lines.append("delegated work launched")
-        else:
+        elif not delegated:
             lines.append("awaiting activity")
         return lines
+
+    def _lead_activity_lines(
+        self,
+        lead_turns: list[GraphNode],
+        final_turn: GraphNode | None,
+        max_items: int,
+    ) -> list[str]:
+        activity: list[str] = []
+        for turn in lead_turns:
+            if final_turn is not None and turn.id == final_turn.id:
+                continue
+            if turn.label.startswith("Agent: "):
+                activity.append(f"spawned {turn.label.split('Agent: ', 1)[1].strip()}")
+                continue
+
+            detail = str(turn.metadata.get("raw_text") or turn.label).strip()
+            if not detail:
+                continue
+            summary = self._summarize_text(detail)
+            if summary and summary not in activity:
+                activity.append(summary)
+
+        return activity[-max_items:]
 
     def _worker_body_lines(self, worker: GraphNode, summary_text: str | None) -> list[str]:
         if summary_text:
@@ -514,6 +544,16 @@ class QueryFlowBuilder:
         if worker.status:
             return [worker.status]
         return ["waiting for progress"]
+
+    def _summarize_text(self, text: str, fallback: str = "") -> str:
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return fallback
+        if normalized in {"Read", "Bash", "Glob", "Task", "TaskList", "Assistant response"}:
+            return fallback
+        if len(normalized) <= 72:
+            return normalized
+        return normalized[:69].rstrip() + "..."
 
     def _display_worker_label(self, label: str, index: int) -> str:
         if label.startswith("a") and label[1:].isalnum():

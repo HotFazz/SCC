@@ -98,10 +98,19 @@ def test_query_flow_groups_requests_into_scroll_sections() -> None:
     assert model.sections[0].worker_flows[0].worker_card.body_lines == ["reported progress"]
     assert model.sections[0].worker_flows[0].summary_card.body_lines == ["Repo structure complete."]
     assert model.sections[0].lead_card is not None
-    assert model.sections[0].lead_card.body_lines[-1] == "response delivered"
+    assert model.sections[0].lead_card.max_body_lines == 8
+    assert model.sections[0].lead_card.body_lines == [
+        "window: 10:00:00",
+        "delegated to 1 worker",
+        "reports: 1/1",
+        "spawned Explore repo structure",
+        "response delivered",
+    ]
     assert model.sections[0].final_card is not None
     assert model.sections[0].final_card.title == "Claude Code"
     assert model.sections[1].request_card.title == "You"
+    assert model.sections[1].lead_card is not None
+    assert model.sections[1].lead_card.max_body_lines == 4
 
 
 def test_query_flow_ignores_sidechain_user_prompts_as_sections() -> None:

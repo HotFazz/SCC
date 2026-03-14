@@ -113,7 +113,7 @@ class BoardCardWidget(Vertical):
         yield Static(self.card.title, classes="card-title")
         if self.card.subtitle:
             yield Static(self.card.subtitle, classes="card-subtitle")
-        for line in self.card.body_lines[:5]:
+        for line in self.card.body_lines[: self.card.max_body_lines]:
             yield Static(line, classes="card-body")
 
     def on_click(self, event: events.Click) -> None:

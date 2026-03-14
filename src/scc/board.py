@@ -30,6 +30,7 @@ class BoardCard:
     subtitle: str | None = None
     body_lines: list[str] = field(default_factory=list)
     node_ids: set[str] = field(default_factory=set)
+    max_body_lines: int = 5
 
 
 @dataclass(slots=True)

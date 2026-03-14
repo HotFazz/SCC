@@ -198,4 +198,5 @@ async def test_app_keeps_lead_card_visible_under_request_in_session_focus(tmp_pa
 
         assert request_card.region.y < lead_card.region.y
         assert lead_card.region.y - request_card.region.y < 20
+        assert lead_card.region.height > request_card.region.height
         assert worker_card.region.y - request_card.region.y < 30
