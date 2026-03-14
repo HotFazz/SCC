@@ -4,17 +4,17 @@ import json
 from pathlib import Path
 from threading import Event
 
-from textual import work
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Select, Static
 from watchfiles import watch
 
+from scc.board_view import SwarmBoard
 from scc.claude_cli import ClaudeCLIClient, ClaudeCommandResult
 from scc.domain import GraphSnapshot, TimelineEvent
 from scc.loader import ClaudeStateLoader
-from scc.render import AsciiGraphRenderer
 from scc.view import (
     FocusOption,
     FocusedSnapshot,
@@ -55,7 +55,7 @@ class SCCApp(App[None]):
       padding: 1;
     }
 
-    #graph {
+    #board {
       width: auto;
       height: auto;
     }
@@ -109,7 +109,6 @@ class SCCApp(App[None]):
         self.claude_home = Path(claude_home).expanduser()
         self.workspace = Path(workspace).expanduser()
         self.loader = ClaudeStateLoader(self.claude_home)
-        self.renderer = AsciiGraphRenderer()
         self.claude = ClaudeCLIClient()
         self.snapshot = GraphSnapshot()
         self.focused_view = FocusedSnapshot(
@@ -131,7 +130,7 @@ class SCCApp(App[None]):
         yield Select([("Loading...", "all")], allow_blank=False, value="all", id="focus")
         with Horizontal(id="main"):
             with ScrollableContainer(id="graph-scroll"):
-                yield Static(id="graph", markup=False)
+                yield SwarmBoard()
             with Vertical(id="sidebar"):
                 yield ListView(id="timeline")
                 yield Static("Select a node or event to inspect details.", id="inspector", markup=False)
@@ -206,11 +205,10 @@ class SCCApp(App[None]):
         self._render_summary()
 
     def _render_graph(self) -> None:
-        document = self.renderer.render(
+        self.query_one(SwarmBoard).update_from_snapshot(
             self.focused_view.snapshot,
             selected_node_id=self.selected_node_id,
         )
-        self.query_one("#graph", Static).update(document.text)
 
     def _render_timeline(self) -> None:
         timeline = self.query_one("#timeline", ListView)
@@ -294,6 +292,14 @@ class SCCApp(App[None]):
             self.selected_node_id = source_node_id
             self._render_graph()
             self._render_inspector()
+
+    @on(SwarmBoard.CardSelected)
+    def handle_board_card_selected(self, message: SwarmBoard.CardSelected) -> None:
+        if message.node_id not in self.focused_view.snapshot.nodes:
+            return
+        self.selected_node_id = message.node_id
+        self._render_graph()
+        self._render_inspector()
 
     def _timeline_text(self, event: TimelineEvent) -> str:
         speaker = str(event.metadata.get("speaker") or self._fallback_speaker(event))
