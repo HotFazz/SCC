@@ -8,14 +8,21 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Select, Static
+from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Select, Static
 from watchfiles import watch
 
 from scc.claude_cli import ClaudeCLIClient, ClaudeCommandResult
-from scc.domain import GraphSnapshot
+from scc.domain import GraphSnapshot, TimelineEvent
 from scc.loader import ClaudeStateLoader
 from scc.render import AsciiGraphRenderer
-from scc.view import FocusOption, FocusedSnapshot, build_focus_options, focus_snapshot, pick_default_node
+from scc.view import (
+    FocusOption,
+    FocusedSnapshot,
+    build_focus_options,
+    build_transcript_events,
+    focus_snapshot,
+    pick_default_node,
+)
 
 
 class SCCApp(App[None]):
@@ -61,6 +68,11 @@ class SCCApp(App[None]):
     #timeline {
       height: 1fr;
       border: solid $success;
+    }
+
+    #timeline > ListItem {
+      padding: 0 1;
+      margin-bottom: 1;
     }
 
     #inspector {
@@ -110,6 +122,7 @@ class SCCApp(App[None]):
         self.status_line = "Loading Claude state..."
         self.last_command_result: ClaudeCommandResult | None = None
         self._visible_events: list = []
+        self._transcript_events: list[TimelineEvent] = []
         self._watch_stop = Event()
 
     def compose(self) -> ComposeResult:
@@ -130,7 +143,7 @@ class SCCApp(App[None]):
 
     def on_mount(self) -> None:
         self.query_one("#graph-scroll", ScrollableContainer).border_title = "Swarm Board"
-        self.query_one("#timeline", ListView).border_title = "Timeline"
+        self.query_one("#timeline", ListView).border_title = "Claude Transcript"
         self.query_one("#inspector", Static).border_title = "Inspector"
         self.load_snapshot()
         self.watch_claude_state()
@@ -184,6 +197,7 @@ class SCCApp(App[None]):
     def _refresh_focus(self) -> None:
         self.focused_view = focus_snapshot(self.snapshot, self.focus_value)
         self._visible_events = self.focused_view.events
+        self._transcript_events = build_transcript_events(self.focused_view)
         if self.selected_node_id not in self.focused_view.snapshot.nodes:
             self.selected_node_id = pick_default_node(self.focused_view.snapshot)
         self._render_graph()
@@ -202,11 +216,12 @@ class SCCApp(App[None]):
         timeline = self.query_one("#timeline", ListView)
         timeline.clear()
         items = []
-        for event in self._visible_events:
-            stamp = (event.timestamp or "--------")[11:19] if event.timestamp else "--------"
-            items.append(ListItem(Label(f"{stamp}  {event.title}")))
+        for event in self._transcript_events:
+            items.append(ListItem(Static(self._timeline_text(event), markup=False)))
         if items:
             timeline.extend(items)
+        else:
+            timeline.extend([ListItem(Static(self._empty_timeline_text(), markup=False))])
 
     def _render_inspector(self) -> None:
         inspector = self.query_one("#inspector", Static)
@@ -232,10 +247,17 @@ class SCCApp(App[None]):
         if node.status:
             lines.append(f"status: {node.status}")
         lines.append(f"edges: {len(connected)}")
+        raw_text = str(node.metadata.get("raw_text", "")).strip()
+        if raw_text:
+            lines.append("")
+            lines.append("message:")
+            lines.append(raw_text[:1200])
         if node.metadata:
             lines.append("")
             lines.append("metadata:")
             for key, value in sorted(node.metadata.items()):
+                if key == "raw_text":
+                    continue
                 rendered = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
                 lines.append(f"  {key}: {rendered[:180]}")
         inspector.update("\n".join(lines))
@@ -244,7 +266,7 @@ class SCCApp(App[None]):
         summary = self.query_one("#summary", Static)
         lines = [
             f"{self.focused_view.focus.label} | board view | nodes {len(self.focused_view.snapshot.nodes)} | "
-            f"edges {len(self.focused_view.snapshot.edges)} | events {len(self._visible_events)}",
+            f"edges {len(self.focused_view.snapshot.edges)} | messages {len(self._transcript_events)}",
             self.status_line,
         ]
         if self.last_command_result is not None:
@@ -265,13 +287,34 @@ class SCCApp(App[None]):
         if event.list_view.id != "timeline":
             return
         index = event.list_view.index
-        if index is None or index < 0 or index >= len(self._visible_events):
+        if index is None or index < 0 or index >= len(self._transcript_events):
             return
-        source_node_id = self._visible_events[index].source_node_id
+        source_node_id = self._transcript_events[index].source_node_id
         if source_node_id and source_node_id in self.focused_view.snapshot.nodes:
             self.selected_node_id = source_node_id
             self._render_graph()
             self._render_inspector()
+
+    def _timeline_text(self, event: TimelineEvent) -> str:
+        speaker = str(event.metadata.get("speaker") or self._fallback_speaker(event))
+        stamp = (event.timestamp or "--------")[11:19] if event.timestamp else "--------"
+        detail = (event.detail or event.title).strip()
+        return f"{speaker}  {stamp}\n{detail}"
+
+    def _fallback_speaker(self, event: TimelineEvent) -> str:
+        if event.kind == "user_turn":
+            return "You"
+        if event.kind == "assistant_turn":
+            return "Claude Code"
+        return "Event"
+
+    def _empty_timeline_text(self) -> str:
+        if self.focus_value.startswith("team:"):
+            return (
+                "No primary Claude Code transcript is recorded for this team.\n"
+                "Select a Session focus to inspect a worker conversation."
+            )
+        return "No Claude Code transcript available for the current focus."
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send":

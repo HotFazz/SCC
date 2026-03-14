@@ -163,4 +163,7 @@ def test_loader_builds_graph_from_team_files_and_transcripts(tmp_path: Path) -> 
 
     timeline_titles = [event.title for event in snapshot.timeline]
     assert "Task #1 assigned to worker" in timeline_titles
-
+    transcript_events = [event for event in snapshot.timeline if event.kind in {"user_turn", "assistant_turn"}]
+    assert any(event.detail == "Please inspect the repo." for event in transcript_events)
+    assert any(event.detail == "Creating a team and assigning work." for event in transcript_events)
+    assert any(event.detail == "The repository structure is clear." for event in transcript_events)

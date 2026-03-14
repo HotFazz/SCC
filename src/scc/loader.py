@@ -283,12 +283,21 @@ class ClaudeStateLoader:
             team_name = record.get("teamName")
             agent_node_id = self._agent_for_record(snapshot, record, team_hint=team_name)
             if record_type == "user":
+                detail = self._detail_for_user_record(record)
+                speaker = self._speaker_for_record(
+                    snapshot,
+                    record=record,
+                    kind=NodeKind.USER_REQUEST,
+                    agent_node_id=agent_node_id,
+                )
                 node_id = self._add_turn_node(
                     snapshot,
                     record=record,
                     kind=NodeKind.USER_REQUEST,
                     label=self._label_for_user_record(record),
                     agent_node_id=agent_node_id,
+                    raw_text=detail,
+                    speaker=speaker,
                 )
                 if agent_node_id:
                     snapshot.add_edge(
@@ -304,20 +313,34 @@ class ClaudeStateLoader:
                         timestamp=record.get("timestamp"),
                         kind="user_turn",
                         title=self._label_for_user_record(record),
+                        detail=detail,
                         source_node_id=node_id,
                         team=team_name,
                         session_id=session_id,
+                        metadata={
+                            "speaker": speaker,
+                            "is_sidechain": bool(record.get("isSidechain")),
+                        },
                     )
                 )
                 continue
 
             label = self._label_for_assistant_record(record)
+            detail = self._detail_for_assistant_record(record)
+            speaker = self._speaker_for_record(
+                snapshot,
+                record=record,
+                kind=NodeKind.MODEL_TURN,
+                agent_node_id=agent_node_id,
+            )
             node_id = self._add_turn_node(
                 snapshot,
                 record=record,
                 kind=NodeKind.MODEL_TURN,
                 label=label,
                 agent_node_id=agent_node_id,
+                raw_text=detail,
+                speaker=speaker,
             )
             if agent_node_id:
                 snapshot.add_edge(
@@ -327,17 +350,22 @@ class ClaudeStateLoader:
                         kind=EdgeKind.PRODUCED,
                     )
                 )
-            snapshot.add_event(
-                TimelineEvent(
-                    id=f"turn:{node_id}",
-                    timestamp=record.get("timestamp"),
-                    kind="assistant_turn",
-                    title=label,
-                    source_node_id=node_id,
-                    team=team_name,
-                    session_id=session_id,
+                snapshot.add_event(
+                    TimelineEvent(
+                        id=f"turn:{node_id}",
+                        timestamp=record.get("timestamp"),
+                        kind="assistant_turn",
+                        title=label,
+                        detail=detail,
+                        source_node_id=node_id,
+                        team=team_name,
+                        session_id=session_id,
+                        metadata={
+                            "speaker": speaker,
+                            "is_sidechain": bool(record.get("isSidechain")),
+                        },
+                    )
                 )
-            )
 
     def _load_subagent_transcript(self, snapshot: GraphSnapshot, transcript_path: Path) -> None:
         records = list(self._iter_jsonl(transcript_path))
@@ -380,29 +408,79 @@ class ClaudeStateLoader:
                 continue
 
             if record_type == "user":
+                detail = self._detail_for_user_record(record)
+                speaker = self._speaker_for_record(
+                    snapshot,
+                    record=record,
+                    kind=NodeKind.USER_REQUEST,
+                    agent_node_id=mapped_node_id,
+                )
                 node_id = self._add_turn_node(
                     snapshot,
                     record=record,
                     kind=NodeKind.USER_REQUEST,
                     label=self._label_for_user_record(record),
                     agent_node_id=mapped_node_id,
+                    raw_text=detail,
+                    speaker=speaker,
                 )
                 if mapped_node_id:
                     snapshot.add_edge(
                         GraphEdge(source=node_id, target=mapped_node_id, kind=EdgeKind.ROUTED_TO)
                     )
+                snapshot.add_event(
+                    TimelineEvent(
+                        id=f"turn:{node_id}",
+                        timestamp=record.get("timestamp"),
+                        kind="user_turn",
+                        title=self._label_for_user_record(record),
+                        detail=detail,
+                        source_node_id=node_id,
+                        team=team_name,
+                        session_id=record.get("sessionId"),
+                        metadata={
+                            "speaker": speaker,
+                            "is_sidechain": bool(record.get("isSidechain")),
+                        },
+                    )
+                )
             else:
+                detail = self._detail_for_assistant_record(record)
+                speaker = self._speaker_for_record(
+                    snapshot,
+                    record=record,
+                    kind=NodeKind.MODEL_TURN,
+                    agent_node_id=mapped_node_id,
+                )
                 node_id = self._add_turn_node(
                     snapshot,
                     record=record,
                     kind=NodeKind.MODEL_TURN,
                     label=self._label_for_assistant_record(record),
                     agent_node_id=mapped_node_id,
+                    raw_text=detail,
+                    speaker=speaker,
                 )
                 if mapped_node_id:
                     snapshot.add_edge(
                         GraphEdge(source=mapped_node_id, target=node_id, kind=EdgeKind.PRODUCED)
                     )
+                snapshot.add_event(
+                    TimelineEvent(
+                        id=f"turn:{node_id}",
+                        timestamp=record.get("timestamp"),
+                        kind="assistant_turn",
+                        title=self._label_for_assistant_record(record),
+                        detail=detail,
+                        source_node_id=node_id,
+                        team=team_name,
+                        session_id=record.get("sessionId"),
+                        metadata={
+                            "speaker": speaker,
+                            "is_sidechain": bool(record.get("isSidechain")),
+                        },
+                    )
+                )
 
     def _add_turn_node(
         self,
@@ -411,9 +489,22 @@ class ClaudeStateLoader:
         kind: NodeKind,
         label: str,
         agent_node_id: str | None,
+        raw_text: str | None = None,
+        speaker: str | None = None,
     ) -> str:
         node_id = f"turn:{record['uuid']}"
         cluster = record.get("teamName") or self._cluster_for_agent(snapshot, agent_node_id)
+        metadata = {
+            "request_id": record.get("requestId"),
+            "parent_uuid": record.get("parentUuid"),
+            "path": str(record.get("cwd") or ""),
+        }
+        if raw_text:
+            metadata["raw_text"] = raw_text
+        if speaker:
+            metadata["speaker"] = speaker
+        if record.get("isSidechain"):
+            metadata["is_sidechain"] = True
         snapshot.upsert_node(
             GraphNode(
                 id=node_id,
@@ -423,11 +514,7 @@ class ClaudeStateLoader:
                 session_id=record.get("sessionId"),
                 agent_id=record.get("agentId"),
                 timestamp=record.get("timestamp"),
-                metadata={
-                    "request_id": record.get("requestId"),
-                    "parent_uuid": record.get("parentUuid"),
-                    "path": str(record.get("cwd") or ""),
-                },
+                metadata=metadata,
             )
         )
         parent_uuid = record.get("parentUuid")
@@ -626,7 +713,7 @@ class ClaudeStateLoader:
         return False
 
     def _label_for_user_record(self, record: dict[str, Any]) -> str:
-        text = self._raw_message_text(record.get("message"))
+        text = self._detail_for_user_record(record)
         return self._summarize_text(text, fallback="User request")
 
     def _label_for_assistant_record(self, record: dict[str, Any]) -> str:
@@ -641,7 +728,26 @@ class ClaudeStateLoader:
                 detail = payload.get("subject") or payload.get("team_name") or payload.get("description")
                 base = f"{name}: {detail}" if detail else name
                 return self._summarize_text(base, fallback="Tool use")
-        return self._summarize_text(self._raw_message_text(message), fallback="Assistant response")
+        return self._summarize_text(self._detail_for_assistant_record(record), fallback="Assistant response")
+
+    def _detail_for_user_record(self, record: dict[str, Any]) -> str:
+        text = self._clean_message_text(self._raw_message_text(record.get("message")))
+        return text or "User request"
+
+    def _detail_for_assistant_record(self, record: dict[str, Any]) -> str:
+        message = record.get("message", {})
+        content = message.get("content")
+        if isinstance(content, list):
+            text_chunks = [
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+            ]
+            text = self._clean_message_text("\n".join(text_chunks))
+            if text:
+                return text
+        text = self._clean_message_text(self._raw_message_text(message))
+        return text or "Assistant response"
 
     def _raw_message_text(self, message: Any) -> str:
         if isinstance(message, dict):
@@ -664,6 +770,14 @@ class ClaudeStateLoader:
             return "\n".join(chunk for chunk in chunks if chunk)
         return ""
 
+    def _clean_message_text(self, text: str) -> str:
+        if not text:
+            return ""
+        text = re.sub(r"</?teammate-message[^>]*>", "", text)
+        text = text.replace("\r\n", "\n")
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
     def _summarize_text(self, text: str, fallback: str = "Event") -> str:
         normalized = re.sub(r"\s+", " ", text).strip()
         if not normalized:
@@ -671,6 +785,28 @@ class ClaudeStateLoader:
         if len(normalized) <= 72:
             return normalized
         return normalized[:69].rstrip() + "..."
+
+    def _speaker_for_record(
+        self,
+        snapshot: GraphSnapshot,
+        record: dict[str, Any],
+        kind: NodeKind,
+        agent_node_id: str | None,
+    ) -> str:
+        is_sidechain = bool(record.get("isSidechain"))
+        if kind == NodeKind.USER_REQUEST:
+            return "Claude Code" if is_sidechain else "You"
+        if not is_sidechain:
+            return "Claude Code"
+        if agent_node_id and agent_node_id in snapshot.nodes:
+            return self._normalize_agent_label(snapshot.nodes[agent_node_id].label)
+        return "Worker"
+
+    def _normalize_agent_label(self, label: str) -> str:
+        compact = label.strip()
+        if re.fullmatch(r"a[0-9a-f]{6,}", compact) or re.fullmatch(r"acompact-[0-9a-f]+", compact):
+            return "Worker"
+        return compact or "Worker"
 
     def _parse_json_text(self, raw: str) -> dict[str, Any] | None:
         raw = raw.strip()

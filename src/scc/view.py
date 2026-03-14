@@ -19,6 +19,51 @@ class FocusedSnapshot:
     events: list[TimelineEvent]
 
 
+def build_transcript_events(
+    focused: FocusedSnapshot,
+    limit: int = 120,
+) -> list[TimelineEvent]:
+    turn_events = [
+        event
+        for event in focused.events
+        if event.kind in {"user_turn", "assistant_turn"}
+    ]
+    if not turn_events:
+        return focused.events[-limit:]
+
+    focus_value = focused.focus.value
+    if focus_value.startswith("team:"):
+        team_name = focus_value.split(":", 1)[1]
+        team_node = focused.snapshot.nodes.get(f"team:{team_name}")
+        lead_session_id = team_node.session_id if team_node else None
+        if lead_session_id:
+            main_session = [
+                event
+                for event in turn_events
+                if event.session_id == lead_session_id and not event.metadata.get("is_sidechain")
+            ]
+            if main_session:
+                return main_session[-limit:]
+
+        primary = [
+            event
+            for event in turn_events
+            if event.team == team_name and not event.metadata.get("is_sidechain")
+        ]
+        if primary:
+            return primary[-limit:]
+
+        return []
+
+    if focus_value.startswith("session:"):
+        session_id = focus_value.split(":", 1)[1]
+        session_events = [event for event in turn_events if event.session_id == session_id]
+        return session_events[-limit:]
+
+    primary = [event for event in turn_events if not event.metadata.get("is_sidechain")]
+    return primary[-limit:]
+
+
 def build_focus_options(snapshot: GraphSnapshot) -> list[FocusOption]:
     team_timestamps: dict[str, str | None] = {}
     session_timestamps: dict[str, str | None] = {}
@@ -82,16 +127,26 @@ def focus_snapshot(
 
     if focus_value.startswith("team:"):
         team_name = focus_value.split(":", 1)[1]
+        team_node = snapshot.nodes.get(f"team:{team_name}")
+        lead_session_id = team_node.session_id if team_node else None
         node_ids = {
             node_id
             for node_id, node in snapshot.nodes.items()
             if node.cluster == team_name or node_id == f"team:{team_name}"
         }
+        if lead_session_id:
+            node_ids.update(
+                node_id
+                for node_id, node in snapshot.nodes.items()
+                if node.session_id == lead_session_id
+            )
         node_ids = _trim_turn_nodes(snapshot, node_ids, turn_limit)
         events = [
             event
             for event in snapshot.sorted_timeline()
-            if event.team == team_name or event.source_node_id in node_ids
+            if event.team == team_name
+            or event.source_node_id in node_ids
+            or (lead_session_id is not None and event.session_id == lead_session_id)
         ][-event_limit:]
         return FocusedSnapshot(focus=focus, snapshot=_clone_snapshot(snapshot, node_ids, events), events=events)
 
