@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "monitor":
-        app = SCCApp()
+        app = SCCApp(claude_home=args.claude_home, workspace=args.workspace)
         app.run()
         return 0
 
