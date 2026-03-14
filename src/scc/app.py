@@ -141,7 +141,7 @@ class SCCApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#graph-scroll", ScrollableContainer).border_title = "Swarm Board"
+        self.query_one("#graph-scroll", ScrollableContainer).border_title = "Query Flow"
         self.query_one("#timeline", ListView).border_title = "Claude Transcript"
         self.query_one("#inspector", Static).border_title = "Inspector"
         self.load_snapshot()
@@ -263,7 +263,7 @@ class SCCApp(App[None]):
     def _render_summary(self) -> None:
         summary = self.query_one("#summary", Static)
         lines = [
-            f"{self.focused_view.focus.label} | board view | nodes {len(self.focused_view.snapshot.nodes)} | "
+            f"{self.focused_view.focus.label} | query flow | nodes {len(self.focused_view.snapshot.nodes)} | "
             f"edges {len(self.focused_view.snapshot.edges)} | messages {len(self._transcript_events)}",
             self.status_line,
         ]

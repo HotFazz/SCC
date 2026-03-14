@@ -1,29 +1,21 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
-
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Static
 
-from scc.board import BoardBuilder, BoardCard, BoardConnection, BoardModel, LANE_ORDER, LANE_TITLES
+from scc.board import BoardCard
 from scc.domain import GraphSnapshot
-
-
-@dataclass(slots=True)
-class CardRelations:
-    incoming: list[str]
-    outgoing: list[str]
+from scc.query_flow import QueryFlowBuilder, QueryFlowModel, QuerySection, WorkerFlow
 
 
 class BoardCardWidget(Vertical):
     DEFAULT_CSS = """
     BoardCardWidget {
       height: auto;
-      min-height: 8;
+      min-height: 7;
       padding: 1;
       border: round $panel-lighten-1;
       background: $panel;
@@ -63,8 +55,9 @@ class BoardCardWidget(Vertical):
       background: #35190c;
     }
 
-    BoardCardWidget:focus {
-      border: heavy $accent-lighten-1;
+    BoardCardWidget.lane-final {
+      border: round #3f7d31;
+      background: #21391a;
     }
 
     BoardCardWidget .card-token {
@@ -73,23 +66,18 @@ class BoardCardWidget(Vertical):
     }
 
     BoardCardWidget .card-title {
-      text-style: bold;
       margin-top: 1;
+      text-style: bold;
     }
 
     BoardCardWidget .card-subtitle {
-      color: $text-muted;
       margin-top: 1;
+      color: $text-muted;
     }
 
     BoardCardWidget .card-body {
       margin-top: 1;
       color: $text;
-    }
-
-    BoardCardWidget .card-relations {
-      margin-top: 1;
-      color: $text-muted;
     }
     """
 
@@ -100,18 +88,12 @@ class BoardCardWidget(Vertical):
 
     can_focus = True
 
-    def __init__(
-        self,
-        card: BoardCard,
-        relations: CardRelations,
-        selected: bool = False,
-    ) -> None:
+    def __init__(self, card: BoardCard, selected: bool = False) -> None:
         classes = f"board-card lane-{card.lane}"
         if selected:
             classes += " is-selected"
         super().__init__(classes=classes, id=f"card-{card.card_id}")
         self.card = card
-        self.relations = relations
 
     @property
     def preferred_node_id(self) -> str | None:
@@ -124,20 +106,131 @@ class BoardCardWidget(Vertical):
         yield Static(self.card.title, classes="card-title")
         if self.card.subtitle:
             yield Static(self.card.subtitle, classes="card-subtitle")
-        for line in self.card.body_lines[:4]:
+        for line in self.card.body_lines[:5]:
             yield Static(line, classes="card-body")
-        relation_text = self._relation_text()
-        if relation_text:
-            yield Static(relation_text, classes="card-relations")
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
         if self.preferred_node_id:
             self.post_message(self.Selected(self.preferred_node_id))
 
-    def _relation_text(self) -> str:
-        labels = self.relations.incoming[:1] + self.relations.outgoing[:2]
-        return "  |  ".join(labels)
+
+class WorkerFlowWidget(Vertical):
+    DEFAULT_CSS = """
+    WorkerFlowWidget {
+      width: 28;
+      min-width: 24;
+      max-width: 32;
+      height: auto;
+      margin-right: 1;
+    }
+
+    WorkerFlowWidget > BoardCardWidget {
+      margin-bottom: 1;
+    }
+    """
+
+    def __init__(self, flow: WorkerFlow, selected_card_id: str | None) -> None:
+        super().__init__(classes="worker-flow")
+        self.flow = flow
+        self.selected_card_id = selected_card_id
+
+    def compose(self) -> ComposeResult:
+        for card in (self.flow.task_card, self.flow.worker_card, self.flow.summary_card):
+            if card is not None:
+                yield BoardCardWidget(card, selected=self.selected_card_id == card.card_id)
+
+
+class QuerySectionWidget(Vertical):
+    DEFAULT_CSS = """
+    QuerySectionWidget {
+      height: auto;
+      margin-bottom: 2;
+    }
+
+    QuerySectionWidget .request-row {
+      height: auto;
+      margin-bottom: 1;
+    }
+
+    QuerySectionWidget .request-wrap {
+      width: 52;
+      min-width: 40;
+    }
+
+    QuerySectionWidget .cluster-shell {
+      height: auto;
+      padding: 1;
+      border: round $panel-lighten-1;
+      background: $surface;
+    }
+
+    QuerySectionWidget .cluster-main {
+      height: auto;
+      min-height: 16;
+    }
+
+    QuerySectionWidget .lead-wrap {
+      width: 32;
+      min-width: 28;
+      margin-right: 2;
+    }
+
+    QuerySectionWidget .workers-strip {
+      width: 1fr;
+      height: auto;
+    }
+
+    QuerySectionWidget .empty-workers {
+      color: $text-muted;
+      padding: 2 1;
+    }
+
+    QuerySectionWidget .cluster-footer {
+      height: auto;
+      margin-top: 1;
+    }
+
+    QuerySectionWidget .final-wrap {
+      width: 64;
+      min-width: 48;
+    }
+    """
+
+    def __init__(self, section: QuerySection, selected_card_id: str | None) -> None:
+        super().__init__(classes="query-section")
+        self.section = section
+        self.selected_card_id = selected_card_id
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="request-row"):
+            with Vertical(classes="request-wrap"):
+                yield BoardCardWidget(
+                    self.section.request_card,
+                    selected=self.selected_card_id == self.section.request_card.card_id,
+                )
+
+        with Vertical(classes="cluster-shell"):
+            with Horizontal(classes="cluster-main"):
+                with Vertical(classes="lead-wrap"):
+                    if self.section.lead_card is not None:
+                        yield BoardCardWidget(
+                            self.section.lead_card,
+                            selected=self.selected_card_id == self.section.lead_card.card_id,
+                        )
+                with Horizontal(classes="workers-strip"):
+                    if self.section.worker_flows:
+                        for flow in self.section.worker_flows:
+                            yield WorkerFlowWidget(flow, self.selected_card_id)
+                    else:
+                        yield Static("No delegated work in this query window.", classes="empty-workers")
+            if self.section.final_card is not None:
+                with Horizontal(classes="cluster-footer"):
+                    with Vertical(classes="final-wrap"):
+                        yield BoardCardWidget(
+                            self.section.final_card,
+                            selected=self.selected_card_id == self.section.final_card.card_id,
+                        )
 
 
 class SwarmBoard(Vertical):
@@ -158,41 +251,6 @@ class SwarmBoard(Vertical):
       padding: 1;
       color: $text-muted;
     }
-
-    SwarmBoard .board-header {
-      height: 3;
-      margin-bottom: 1;
-    }
-
-    SwarmBoard .lane-header {
-      width: 1fr;
-      min-width: 24;
-      content-align: center middle;
-      text-style: bold;
-      color: $text;
-      background: $surface;
-      border: tall $panel-lighten-1;
-    }
-
-    SwarmBoard .board-body {
-      height: auto;
-    }
-
-    SwarmBoard .board-row {
-      height: auto;
-      margin-bottom: 1;
-    }
-
-    SwarmBoard .board-cell {
-      width: 1fr;
-      min-width: 24;
-      height: auto;
-      padding: 0 1;
-    }
-
-    SwarmBoard .board-spacer {
-      height: 1;
-    }
     """
 
     class CardSelected(Message):
@@ -202,8 +260,8 @@ class SwarmBoard(Vertical):
 
     def __init__(self) -> None:
         super().__init__(id="board")
-        self.builder = BoardBuilder()
-        self.model = BoardModel(title="No focus", rows=[], connections=[], selected_card_id=None)
+        self.builder = QueryFlowBuilder()
+        self.model = QueryFlowModel(title="No focus", sections=[], selected_card_id=None)
 
     def update_from_snapshot(
         self,
@@ -215,54 +273,14 @@ class SwarmBoard(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(self.model.title, id="board-title")
-        if not self.model.rows:
-            yield Static("No graph data available for the current focus.", classes="board-empty")
+        if not self.model.sections:
+            yield Static("No query flow available for the current focus.", classes="board-empty")
             return
 
-        with Horizontal(classes="board-header"):
-            for lane in LANE_ORDER:
-                yield Static(LANE_TITLES[lane], classes="lane-header")
-
-        relation_map = self._relation_map()
-        with Vertical(classes="board-body"):
-            for row in self.model.rows:
-                with Horizontal(classes="board-row"):
-                    for lane in LANE_ORDER:
-                        card = row.cells.get(lane)
-                        with Vertical(classes=f"board-cell lane-{lane}"):
-                            if card is None:
-                                yield Static("", classes="board-spacer")
-                            else:
-                                yield BoardCardWidget(
-                                    card,
-                                    relations=relation_map[card.card_id],
-                                    selected=self.model.selected_card_id == card.card_id,
-                                )
+        for section in self.model.sections:
+            yield QuerySectionWidget(section, self.model.selected_card_id)
 
     @on(BoardCardWidget.Selected)
     def handle_card_selected(self, message: BoardCardWidget.Selected) -> None:
         message.stop()
         self.post_message(self.CardSelected(message.node_id))
-
-    def _relation_map(self) -> dict[str, CardRelations]:
-        incoming: dict[str, list[str]] = defaultdict(list)
-        outgoing: dict[str, list[str]] = defaultdict(list)
-        for connection in self.model.connections:
-            outgoing[connection.source_id].append(self._format_relation(connection, target=True))
-            incoming[connection.target_id].append(self._format_relation(connection, target=False))
-        card_ids = {card.card_id for row in self.model.rows for card in row.cells.values()}
-        return {
-            card_id: CardRelations(
-                incoming=incoming.get(card_id, []),
-                outgoing=outgoing.get(card_id, []),
-            )
-            for card_id in card_ids
-        }
-
-    def _format_relation(self, connection: BoardConnection, target: bool) -> str:
-        other_id = connection.target_id if target else connection.source_id
-        if connection.kind == "blocked":
-            prefix = "blocks" if target else "blocked by"
-            return f"{prefix} {other_id}"
-        prefix = connection.label or connection.kind
-        return f"{prefix} {other_id}"
