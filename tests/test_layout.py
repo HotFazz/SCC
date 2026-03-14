@@ -39,6 +39,27 @@ def test_graphviz_layout_parses_plain_output() -> None:
     assert ("team:demo", "agent:demo:lead", "plain") in layout.edge_paths
 
 
+def test_graphviz_layout_parses_quoted_identifiers() -> None:
+    def runner(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["dot", "-Tplain"],
+            returncode=0,
+            stdout=(
+                'graph 1 10 5\n'
+                'node "team:demo" 1 4 2 1 "demo" solid box black lightgrey\n'
+                'node "agent:demo:lead" 5 2 2 1 "team-lead" solid box black lightgrey\n'
+                'edge "team:demo" "agent:demo:lead" 2 2 4 4 2 solid black\n'
+                "stop\n"
+            ),
+            stderr="",
+        )
+
+    layout = GraphvizLayoutEngine(runner=runner).layout(sample_snapshot())
+    assert "team:demo" in layout.node_positions
+    assert "agent:demo:lead" in layout.node_positions
+    assert ("team:demo", "agent:demo:lead", "plain") in layout.edge_paths
+
+
 def test_auto_layout_falls_back_when_graphviz_is_missing() -> None:
     def missing_runner(*args, **kwargs) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError("dot not found")

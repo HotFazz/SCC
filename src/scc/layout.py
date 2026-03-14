@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,7 +144,7 @@ class GraphvizLayoutEngine:
             stripped = line.strip()
             if not stripped:
                 continue
-            parts = stripped.split()
+            parts = shlex.split(stripped)
             if parts[0] == "graph":
                 width = float(parts[2])
                 height = float(parts[3])

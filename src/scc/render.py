@@ -29,6 +29,8 @@ class AsciiGraphRenderer:
             return GraphDocument("No graph data available for the current focus.", 44, 1)
 
         boxes = self._build_boxes(snapshot, layout)
+        if not boxes:
+            return GraphDocument("Layout produced no renderable node boxes.", 40, 1)
         width = max(left + box_width for left, _, box_width, _ in boxes.values()) + 2
         height = max(top + box_height for _, top, _, box_height in boxes.values()) + 2
         canvas = [[" " for _ in range(width)] for _ in range(height)]
@@ -148,4 +150,3 @@ class AsciiGraphRenderer:
         if width <= 4:
             return text[:width]
         return text[: width - 3].rstrip() + "..."
-
