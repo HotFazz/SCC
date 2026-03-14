@@ -102,31 +102,18 @@ class QueryFlowBuilder:
         cards: list[BoardCard],
     ) -> QuerySection:
         section_id = f"Q{section_index}"
+        request_body = self._request_detail(snapshot, request)
         request_card = self._new_card(
             lane="requests",
             card_id=section_id,
-            title=request.label,
+            title="You",
             subtitle=request.timestamp[11:19] if request.timestamp else "request",
-            body_lines=[self._request_detail(snapshot, request)],
+            body_lines=[request_body] if request_body else ["User request"],
             node_ids={request.id},
         )
         cards.append(request_card)
 
-        lead_card = None
-        if primary is not None:
-            lead_turns = self._lead_turns(snapshot, primary, request.timestamp, window_end)
-            lead_card = self._new_card(
-                lane="lead",
-                title=primary.label,
-                subtitle=self._agent_subtitle(primary),
-                body_lines=[
-                    f"window: {request.timestamp[11:19] if request.timestamp else '---'}",
-                    self._summarize_turns(lead_turns),
-                ],
-                node_ids={primary.id} | {turn.id for turn in lead_turns[-self.summary_limit :]},
-            )
-            cards.append(lead_card)
-
+        lead_turns = self._lead_turns(snapshot, primary, request.timestamp, window_end) if primary is not None else []
         worker_flows = self._worker_flows(
             snapshot=snapshot,
             request=request,
@@ -134,7 +121,24 @@ class QueryFlowBuilder:
             primary=primary,
             cards=cards,
         )
-        final_card = self._final_card(snapshot, request, window_end, primary, cards)
+        final_turn = self._final_turn(lead_turns)
+        lead_card = None
+        if primary is not None:
+            lead_card = self._new_card(
+                lane="lead",
+                title=primary.label,
+                subtitle=self._agent_subtitle(primary),
+                body_lines=self._lead_body_lines(
+                    request=request,
+                    lead_turns=lead_turns,
+                    worker_flows=worker_flows,
+                    final_turn=final_turn,
+                ),
+                node_ids={primary.id} | {turn.id for turn in lead_turns[-self.summary_limit :]},
+            )
+            cards.append(lead_card)
+
+        final_card = self._final_card(final_turn, cards)
         return QuerySection(
             section_id=section_id,
             request_card=request_card,
@@ -213,7 +217,7 @@ class QueryFlowBuilder:
                 lane="workers",
                 title=self._display_worker_label(worker.label, len(flows) + 1),
                 subtitle=self._agent_subtitle(worker),
-                body_lines=[worker_summaries.get(worker.id, "Waiting for progress.")],
+                body_lines=self._worker_body_lines(worker, summary_text=worker_summaries.get(worker.id)),
                 node_ids={worker.id},
             )
             cards.append(worker_card)
@@ -365,27 +369,20 @@ class QueryFlowBuilder:
                 summaries[worker.id] = mailbox[-1]
         return summaries
 
+    def _final_turn(self, lead_turns: list[GraphNode]) -> GraphNode | None:
+        visible = [turn for turn in lead_turns if not turn.label.startswith("Agent: ")]
+        return visible[-1] if visible else None
+
     def _final_card(
         self,
-        snapshot: GraphSnapshot,
-        request: GraphNode,
-        window_end: str | None,
-        primary: GraphNode | None,
+        final_turn: GraphNode | None,
         cards: list[BoardCard],
     ) -> BoardCard | None:
-        if primary is None:
+        if final_turn is None:
             return None
-        lead_turns = [
-            turn
-            for turn in self._lead_turns(snapshot, primary, request.timestamp, window_end)
-            if not turn.label.startswith("Agent: ")
-        ]
-        if not lead_turns:
-            return None
-        final_turn = lead_turns[-1]
         card = self._new_card(
             lane="final",
-            title="Final response",
+            title="Claude Code",
             subtitle=final_turn.timestamp[11:19] if final_turn.timestamp else "response",
             body_lines=[str(final_turn.metadata.get("raw_text") or final_turn.label)],
             node_ids={final_turn.id},
@@ -483,9 +480,40 @@ class QueryFlowBuilder:
             parts.append(model)
         return " | ".join(parts) if parts else "agent"
 
-    def _summarize_turns(self, turns: list[GraphNode]) -> str:
-        visible = [turn.label for turn in turns if not turn.label.startswith("Agent: ")]
-        return visible[-1] if visible else "Delegating work"
+    def _lead_body_lines(
+        self,
+        request: GraphNode,
+        lead_turns: list[GraphNode],
+        worker_flows: list[WorkerFlow],
+        final_turn: GraphNode | None,
+    ) -> list[str]:
+        lines = [f"window: {request.timestamp[11:19] if request.timestamp else '---'}"]
+        delegated = sum(1 for flow in worker_flows if flow.worker_card is not None)
+        if delegated:
+            noun = "worker" if delegated == 1 else "workers"
+            lines.append(f"delegated to {delegated} {noun}")
+        else:
+            lines.append("working directly on this request")
+
+        visible_turns = [turn for turn in lead_turns if not turn.label.startswith("Agent: ")]
+        if final_turn is not None and len(visible_turns) > 1:
+            lines.append(visible_turns[-2].label)
+        elif final_turn is not None:
+            lines.append("response delivered")
+        elif visible_turns:
+            lines.append(visible_turns[-1].label)
+        elif any(turn.label.startswith("Agent: ") for turn in lead_turns):
+            lines.append("delegated work launched")
+        else:
+            lines.append("awaiting activity")
+        return lines
+
+    def _worker_body_lines(self, worker: GraphNode, summary_text: str | None) -> list[str]:
+        if summary_text:
+            return ["reported progress"]
+        if worker.status:
+            return [worker.status]
+        return ["waiting for progress"]
 
     def _display_worker_label(self, label: str, index: int) -> str:
         if label.startswith("a") and label[1:].isalnum():

@@ -91,10 +91,17 @@ def test_query_flow_groups_requests_into_scroll_sections() -> None:
 
     assert model.title.startswith("session ")
     assert len(model.sections) == 2
-    assert model.sections[0].request_card.title == "First query"
+    assert model.sections[0].request_card.title == "You"
     assert model.sections[0].worker_flows[0].task_card is not None
+    assert model.sections[0].worker_flows[0].worker_card is not None
+    assert model.sections[0].worker_flows[0].summary_card is not None
+    assert model.sections[0].worker_flows[0].worker_card.body_lines == ["reported progress"]
+    assert model.sections[0].worker_flows[0].summary_card.body_lines == ["Repo structure complete."]
+    assert model.sections[0].lead_card is not None
+    assert model.sections[0].lead_card.body_lines[-1] == "response delivered"
     assert model.sections[0].final_card is not None
-    assert model.sections[1].request_card.title == "Second query"
+    assert model.sections[0].final_card.title == "Claude Code"
+    assert model.sections[1].request_card.title == "You"
 
 
 def test_query_flow_ignores_sidechain_user_prompts_as_sections() -> None:
@@ -178,4 +185,5 @@ def test_query_flow_ignores_sidechain_user_prompts_as_sections() -> None:
     model = QueryFlowBuilder().build(snapshot)
 
     assert len(model.sections) == 1
-    assert model.sections[0].request_card.title == "Main query"
+    assert model.sections[0].request_card.title == "You"
+    assert model.sections[0].request_card.body_lines == ["Main query"]
