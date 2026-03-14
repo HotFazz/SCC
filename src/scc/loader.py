@@ -31,8 +31,12 @@ class ClaudeStateLoader:
         self.claude_home = claude_home.expanduser()
         self._teams: dict[str, TeamContext] = {}
         self._session_agents: dict[str, str] = {}
+        self._json_cache: dict[Path, Any] = {}
+        self._jsonl_cache: dict[Path, list[dict[str, Any]]] = {}
 
     def load(self) -> GraphSnapshot:
+        self._teams = {}
+        self._session_agents = {}
         snapshot = GraphSnapshot()
         self._load_teams(snapshot)
         self._load_inboxes(snapshot)
@@ -44,10 +48,9 @@ class ClaudeStateLoader:
         teams_dir = self.claude_home / "teams"
         for config_path in sorted(teams_dir.glob("*/config.json")):
             team_name = config_path.parent.name
-            try:
-                payload = json.loads(config_path.read_text())
-            except (OSError, json.JSONDecodeError) as error:
-                snapshot.warnings.append(f"failed to read {config_path}: {error}")
+            payload = self._read_json(snapshot, config_path)
+            if not isinstance(payload, dict):
+                snapshot.warnings.append(f"failed to load {config_path}: expected object")
                 continue
 
             team = self._ensure_team(
@@ -97,10 +100,9 @@ class ClaudeStateLoader:
                 agent_name=agent_name,
                 label=agent_name,
             )
-            try:
-                messages = json.loads(inbox_path.read_text())
-            except (OSError, json.JSONDecodeError) as error:
-                snapshot.warnings.append(f"failed to read {inbox_path}: {error}")
+            messages = self._read_json(snapshot, inbox_path)
+            if not isinstance(messages, list):
+                snapshot.warnings.append(f"failed to load {inbox_path}: expected array")
                 continue
 
             for index, item in enumerate(messages):
@@ -216,10 +218,9 @@ class ClaudeStateLoader:
             team_name = task_path.parent.name
             task_id = task_path.stem
             self._ensure_team(snapshot, team_name=team_name)
-            try:
-                task = json.loads(task_path.read_text())
-            except (OSError, json.JSONDecodeError) as error:
-                snapshot.warnings.append(f"failed to read {task_path}: {error}")
+            task = self._read_json(snapshot, task_path)
+            if not isinstance(task, dict):
+                snapshot.warnings.append(f"failed to load {task_path}: expected object")
                 continue
 
             node_id = f"task:{team_name}:{task_id}"
@@ -271,7 +272,7 @@ class ClaudeStateLoader:
                 self._load_main_transcript(snapshot, project_path)
 
     def _load_main_transcript(self, snapshot: GraphSnapshot, transcript_path: Path) -> None:
-        for record in self._iter_jsonl(transcript_path):
+        for record in self._read_jsonl(snapshot, transcript_path):
             record_type = record.get("type")
             if record_type not in {"user", "assistant"}:
                 continue
@@ -368,7 +369,7 @@ class ClaudeStateLoader:
                 )
 
     def _load_subagent_transcript(self, snapshot: GraphSnapshot, transcript_path: Path) -> None:
-        records = list(self._iter_jsonl(transcript_path))
+        records = self._read_jsonl(snapshot, transcript_path)
         if not records:
             return
 
@@ -690,6 +691,63 @@ class ClaudeStateLoader:
                         continue
         except OSError:
             return
+
+    def _read_json(self, snapshot: GraphSnapshot, path: Path) -> Any | None:
+        try:
+            payload = json.loads(path.read_text())
+        except OSError as error:
+            cached = self._json_cache.get(path)
+            if cached is not None:
+                snapshot.warnings.append(f"using cached {path} after read error: {error}")
+                return cached
+            snapshot.warnings.append(f"failed to read {path}: {error}")
+            return None
+        except json.JSONDecodeError as error:
+            cached = self._json_cache.get(path)
+            if cached is not None:
+                snapshot.warnings.append(f"using cached {path} after parse error: {error}")
+                return cached
+            snapshot.warnings.append(f"failed to parse {path}: {error}")
+            return None
+
+        self._json_cache[path] = payload
+        return payload
+
+    def _read_jsonl(self, snapshot: GraphSnapshot, path: Path) -> list[dict[str, Any]]:
+        try:
+            raw_lines = path.read_text().splitlines()
+        except OSError as error:
+            cached = self._jsonl_cache.get(path)
+            if cached is not None:
+                snapshot.warnings.append(f"using cached {path} after read error: {error}")
+                return cached
+            snapshot.warnings.append(f"failed to read {path}: {error}")
+            return []
+
+        records: list[dict[str, Any]] = []
+        had_decode_error = False
+        for raw_line in raw_lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                had_decode_error = True
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+
+        cached = self._jsonl_cache.get(path)
+        if had_decode_error and cached is not None:
+            snapshot.warnings.append(f"using cached {path} after partial jsonl parse")
+            return cached
+        if not records and cached is not None:
+            snapshot.warnings.append(f"using cached {path} after empty jsonl read")
+            return cached
+        if records:
+            self._jsonl_cache[path] = records
+        return records
 
     def _should_skip_user_record(self, record: dict[str, Any]) -> bool:
         if record.get("isMeta"):

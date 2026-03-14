@@ -159,7 +159,7 @@ class SCCApp(App[None]):
 
     @work(thread=True, exclusive=True, group="reload")
     def load_snapshot(self) -> None:
-        snapshot = ClaudeStateLoader(self.claude_home).load()
+        snapshot = self.loader.load()
         self.call_from_thread(self._apply_snapshot, snapshot)
 
     @work(thread=True, exclusive=True, group="watch")

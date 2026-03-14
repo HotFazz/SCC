@@ -167,3 +167,93 @@ def test_loader_builds_graph_from_team_files_and_transcripts(tmp_path: Path) -> 
     assert any(event.detail == "Please inspect the repo." for event in transcript_events)
     assert any(event.detail == "Creating a team and assigning work." for event in transcript_events)
     assert any(event.detail == "The repository structure is clear." for event in transcript_events)
+
+
+def test_loader_reuses_cached_team_state_on_partial_write(tmp_path: Path) -> None:
+    claude_home = tmp_path / ".claude"
+    config_path = claude_home / "teams/demo/config.json"
+    write_json(
+        config_path,
+        {
+            "name": "demo",
+            "leadAgentId": "team-lead@demo",
+            "leadSessionId": "session-1",
+            "members": [
+                {
+                    "agentId": "team-lead@demo",
+                    "name": "team-lead",
+                    "agentType": "team-lead",
+                    "model": "claude-opus",
+                },
+                {
+                    "agentId": "worker@demo",
+                    "name": "worker",
+                    "agentType": "general-purpose",
+                    "model": "claude-sonnet",
+                },
+            ],
+        },
+    )
+
+    loader = ClaudeStateLoader(claude_home)
+    first = loader.load()
+    assert "agent:demo:worker" in first.nodes
+
+    config_path.write_text('{"name": "demo", "members": [')
+    second = loader.load()
+
+    assert "agent:demo:worker" in second.nodes
+    assert any("using cached" in warning for warning in second.warnings)
+
+
+def test_loader_reuses_cached_subagent_transcript_on_partial_write(tmp_path: Path) -> None:
+    claude_home = tmp_path / ".claude"
+    transcript_path = claude_home / "projects/workspace/session-1/subagents/agent-worker.jsonl"
+    write_jsonl(
+        transcript_path,
+        [
+            {
+                "type": "user",
+                "uuid": "sub-user-1",
+                "parentUuid": None,
+                "sessionId": "session-1",
+                "agentId": "runtime-worker",
+                "isSidechain": True,
+                "timestamp": "2026-03-14T10:00:01Z",
+                "cwd": "/tmp/demo",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        '<teammate-message teammate_id="team-lead" summary="Inspect repo">'
+                        "You are a teammate on the demo team. "
+                        "Start by reading your assigned task (#1)."
+                        "</teammate-message>"
+                    ),
+                },
+            },
+            {
+                "type": "assistant",
+                "uuid": "sub-assistant-1",
+                "parentUuid": "sub-user-1",
+                "sessionId": "session-1",
+                "agentId": "runtime-worker",
+                "isSidechain": True,
+                "timestamp": "2026-03-14T10:00:10Z",
+                "cwd": "/tmp/demo",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "The repository structure is clear."}],
+                },
+            },
+        ],
+    )
+
+    loader = ClaudeStateLoader(claude_home)
+    first = loader.load()
+    assert "agent:runtime:runtime-worker" in first.nodes
+
+    transcript_path.write_text('{"type":"user"')
+    second = loader.load()
+
+    assert "agent:runtime:runtime-worker" in second.nodes
+    assert any("using cached" in warning for warning in second.warnings)
