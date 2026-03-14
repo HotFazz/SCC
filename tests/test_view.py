@@ -1,5 +1,5 @@
-from scc.domain import GraphNode, GraphSnapshot, NodeKind, TimelineEvent
-from scc.view import FocusOption, FocusedSnapshot, build_transcript_events
+from scc.domain import EdgeKind, GraphEdge, GraphNode, GraphSnapshot, NodeKind, TimelineEvent
+from scc.view import FocusOption, FocusedSnapshot, build_transcript_events, focus_snapshot
 
 
 def test_team_transcript_prefers_lead_session() -> None:
@@ -103,3 +103,78 @@ def test_team_transcript_hides_sidechains_without_primary_session() -> None:
     )
 
     assert build_transcript_events(focused) == []
+
+
+def test_session_focus_keeps_related_tasks_and_team_nodes() -> None:
+    snapshot = GraphSnapshot()
+    snapshot.upsert_node(
+        GraphNode(
+            id="team:demo",
+            kind=NodeKind.TEAM,
+            label="demo",
+            cluster="demo",
+            session_id="session-1",
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="agent:session:session-1",
+            kind=NodeKind.AGENT,
+            label="claude",
+            session_id="session-1",
+            cluster="demo",
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="task:demo:1",
+            kind=NodeKind.TASK,
+            label="#1 Inspect repository",
+            cluster="demo",
+            status="in_progress",
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="turn:user-1",
+            kind=NodeKind.USER_REQUEST,
+            label="Inspect the repo.",
+            session_id="session-1",
+            cluster="demo",
+            timestamp="2026-03-15T10:00:00Z",
+        )
+    )
+    snapshot.add_edge(GraphEdge(source="team:demo", target="agent:session:session-1", kind=EdgeKind.CONTAINS))
+    snapshot.add_edge(GraphEdge(source="team:demo", target="task:demo:1", kind=EdgeKind.CONTAINS))
+    snapshot.add_edge(GraphEdge(source="task:demo:1", target="agent:session:session-1", kind=EdgeKind.ASSIGNED))
+
+    focused = focus_snapshot(snapshot, "session:session-1")
+
+    assert "team:demo" in focused.snapshot.nodes
+    assert "task:demo:1" in focused.snapshot.nodes
+
+
+def test_trim_turn_nodes_preserves_swarm_agent_launches() -> None:
+    snapshot = GraphSnapshot()
+    session_id = "session-1"
+    snapshot.upsert_node(
+        GraphNode(
+            id="agent:session:session-1",
+            kind=NodeKind.AGENT,
+            label="claude",
+            session_id=session_id,
+        )
+    )
+    for index in range(90):
+        node = GraphNode(
+            id=f"turn:{index}",
+            kind=NodeKind.MODEL_TURN,
+            label="Agent: Explore repo structure" if index == 0 else f"Turn {index}",
+            session_id=session_id,
+            timestamp=f"2026-03-15T10:{index:02d}:00Z",
+        )
+        snapshot.upsert_node(node)
+
+    focused = focus_snapshot(snapshot, f"session:{session_id}", turn_limit=20)
+
+    assert "turn:0" in focused.snapshot.nodes

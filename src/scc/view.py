@@ -152,21 +152,12 @@ def focus_snapshot(
 
     if focus_value.startswith("session:"):
         session_id = focus_value.split(":", 1)[1]
-        node_ids = {
+        seed = {
             node_id
             for node_id, node in snapshot.nodes.items()
             if node.session_id == session_id
         }
-        expanded = set(node_ids)
-        for edge in snapshot.edges:
-            if edge.source in node_ids and edge.target in snapshot.nodes:
-                target = snapshot.nodes[edge.target]
-                if target.kind in {NodeKind.AGENT, NodeKind.TEAM}:
-                    expanded.add(edge.target)
-            if edge.target in node_ids and edge.source in snapshot.nodes:
-                source = snapshot.nodes[edge.source]
-                if source.kind in {NodeKind.AGENT, NodeKind.TEAM}:
-                    expanded.add(edge.source)
+        expanded = _expand_session_context(snapshot, seed)
         expanded = _trim_turn_nodes(snapshot, expanded, turn_limit)
         events = [
             event
@@ -214,12 +205,18 @@ def _clone_snapshot(
 
 
 def _trim_turn_nodes(snapshot: GraphSnapshot, node_ids: set[str], turn_limit: int) -> set[str]:
+    protected_turn_ids = {
+        node_id
+        for node_id in node_ids
+        if _should_preserve_turn(snapshot.nodes[node_id])
+    }
     turn_ids = [
         node_id
         for node_id in node_ids
         if snapshot.nodes[node_id].kind in {NodeKind.USER_REQUEST, NodeKind.MODEL_TURN}
+        and node_id not in protected_turn_ids
     ]
-    if len(turn_ids) <= turn_limit:
+    if len(turn_ids) + len(protected_turn_ids) <= turn_limit:
         return node_ids
 
     keep_turns = {
@@ -227,9 +224,29 @@ def _trim_turn_nodes(snapshot: GraphSnapshot, node_ids: set[str], turn_limit: in
         for node in sorted(
             (snapshot.nodes[node_id] for node_id in turn_ids),
             key=lambda item: (item.timestamp or "", item.id),
-        )[-turn_limit:]
+        )[-max(turn_limit - len(protected_turn_ids), 0) :]
     }
+    keep_turns.update(protected_turn_ids)
     return {node_id for node_id in node_ids if node_id not in turn_ids or node_id in keep_turns}
+
+
+def _expand_session_context(snapshot: GraphSnapshot, seed: set[str]) -> set[str]:
+    expanded = set(seed)
+    changed = True
+    while changed:
+        changed = False
+        for edge in snapshot.edges:
+            if edge.source in expanded and edge.target in snapshot.nodes:
+                target = snapshot.nodes[edge.target]
+                if target.kind in {NodeKind.AGENT, NodeKind.TEAM, NodeKind.TASK} and edge.target not in expanded:
+                    expanded.add(edge.target)
+                    changed = True
+            if edge.target in expanded and edge.source in snapshot.nodes:
+                source = snapshot.nodes[edge.source]
+                if source.kind in {NodeKind.AGENT, NodeKind.TEAM, NodeKind.TASK} and edge.source not in expanded:
+                    expanded.add(edge.source)
+                    changed = True
+    return expanded
 
 
 def _latest(current: str | None, candidate: str | None) -> str | None:
@@ -238,3 +255,7 @@ def _latest(current: str | None, candidate: str | None) -> str | None:
     if candidate is None:
         return current
     return max(current, candidate)
+
+
+def _should_preserve_turn(node: GraphNode) -> bool:
+    return node.kind == NodeKind.MODEL_TURN and node.label.startswith("Agent: ")

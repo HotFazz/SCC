@@ -201,9 +201,10 @@ class BoardBuilder:
                 for node in snapshot.nodes.values()
                 if node.kind == NodeKind.AGENT and node.session_id == session_id
             ),
-            key=lambda item: item.label,
+            key=lambda item: (not self._is_session_primary_agent(item, session_id), item.label),
         )
         primary = agents[0] if agents else None
+        workers = [agent for agent in agents if primary is None or agent.id != primary.id]
         requests = sorted(
             (
                 node
@@ -222,28 +223,70 @@ class BoardBuilder:
         cards.append(request_card)
 
         if primary:
+            lead_turns = produced_by_agent.get(primary.id, [])
+            session_tasks = self._session_swarm_task_cards(snapshot, session_id, cards)
+            worker_cards = {
+                worker.id: self._worker_card(worker, produced_by_agent.get(worker.id, []), cards)
+                for worker in workers
+            }
+            summary_cards = {
+                worker.id: self._summary_card(worker, produced_by_agent.get(worker.id, []), [], cards)
+                for worker in workers
+            }
             lead_card = self._new_card(
                 lane="lead",
                 title=primary.label,
                 subtitle=self._agent_subtitle(primary),
-                body_lines=["Main session agent"],
-                node_ids={primary.id},
+                body_lines=[
+                    f"workers: {len(workers)}",
+                    f"active tasks: {len(session_tasks)}",
+                    lead_turns[-1].label if lead_turns else "Main session agent",
+                ],
+                node_ids={primary.id} | {turn.id for turn in lead_turns[-self.summary_limit :]},
             )
             cards.append(lead_card)
-            rows.append(BoardRow(cells={"requests": request_card, "lead": lead_card}))
+            first_row = BoardRow(cells={"requests": request_card, "lead": lead_card})
+            session_summary = self._session_summary_card(primary, lead_turns, cards)
+            if session_summary and not session_tasks:
+                first_row.cells["summaries"] = session_summary
+                connections.append(BoardConnection(lead_card.card_id, session_summary.card_id, "summary", "produces"))
+            rows.append(first_row)
             connections.append(BoardConnection(request_card.card_id, lead_card.card_id, "request", "routes"))
 
-            summaries = produced_by_agent.get(primary.id, [])
-            summary_card = self._new_card(
-                lane="summaries",
-                title="Recent assistant output",
-                subtitle=f"{len(summaries[-self.summary_limit:])} visible",
-                body_lines=[node.label for node in summaries[-self.summary_limit :]] or ["No assistant turns captured."],
-                node_ids={node.id for node in summaries[-self.summary_limit :]},
-            )
-            cards.append(summary_card)
-            rows[0].cells["summaries"] = summary_card
-            connections.append(BoardConnection(lead_card.card_id, summary_card.card_id, "summary", "produces"))
+            for index, task_card in enumerate(session_tasks):
+                row = BoardRow(cells={"tasks": task_card})
+                if lead_card:
+                    connections.append(BoardConnection(lead_card.card_id, task_card.card_id, "dispatch", "dispatches"))
+                worker = workers[index] if index < len(workers) else None
+                if worker:
+                    row.cells["workers"] = worker_cards[worker.id]
+                    connections.append(
+                        BoardConnection(task_card.card_id, worker_cards[worker.id].card_id, "assignment", "owned by")
+                    )
+                    summary_card = summary_cards.get(worker.id)
+                    if summary_card:
+                        row.cells["summaries"] = summary_card
+                        connections.append(
+                            BoardConnection(worker_cards[worker.id].card_id, summary_card.card_id, "summary", "latest")
+                        )
+                        connections.append(
+                            BoardConnection(summary_card.card_id, lead_card.card_id, "report", "reports")
+                        )
+                rows.append(row)
+
+            dangling_workers = workers[len(session_tasks) :]
+            for worker in dangling_workers:
+                row = BoardRow(cells={"workers": worker_cards[worker.id]})
+                summary_card = summary_cards.get(worker.id)
+                if summary_card:
+                    row.cells["summaries"] = summary_card
+                    connections.append(
+                        BoardConnection(worker_cards[worker.id].card_id, summary_card.card_id, "summary", "latest")
+                    )
+                    connections.append(
+                        BoardConnection(summary_card.card_id, lead_card.card_id, "report", "reports")
+                    )
+                rows.append(row)
         else:
             rows.append(BoardRow(cells={"requests": request_card}))
 
@@ -406,6 +449,29 @@ class BoardBuilder:
         cards.append(card)
         return card
 
+    def _session_summary_card(
+        self,
+        primary: GraphNode,
+        turns: list[GraphNode],
+        cards: list[BoardCard],
+    ) -> BoardCard | None:
+        visible = [
+            turn
+            for turn in turns
+            if not turn.label.startswith("Agent: ")
+        ][-self.summary_limit :]
+        if not visible:
+            return None
+        card = self._new_card(
+            lane="summaries",
+            title="Recent assistant output",
+            subtitle=f"{len(visible)} visible",
+            body_lines=[turn.label for turn in visible],
+            node_ids={primary.id} | {turn.id for turn in visible},
+        )
+        cards.append(card)
+        return card
+
     def _task_card(
         self,
         task: GraphNode,
@@ -437,6 +503,41 @@ class BoardBuilder:
         )
         cards.append(card)
         return card
+
+    def _session_swarm_task_cards(
+        self,
+        snapshot: GraphSnapshot,
+        session_id: str,
+        cards: list[BoardCard],
+    ) -> list[BoardCard]:
+        task_turns = []
+        seen_labels: set[str] = set()
+        for node in sorted(snapshot.nodes.values(), key=self._node_sort_key):
+            if node.kind != NodeKind.MODEL_TURN or node.session_id != session_id:
+                continue
+            if not node.label.startswith("Agent: "):
+                continue
+            if node.label in seen_labels:
+                continue
+            seen_labels.add(node.label)
+            task_turns.append(node)
+
+        task_cards: list[BoardCard] = []
+        for turn in task_turns:
+            title = turn.label.split("Agent: ", 1)[1].strip() or turn.label
+            card = self._new_card(
+                lane="tasks",
+                title=title,
+                subtitle="running",
+                body_lines=[
+                    "spawned from session",
+                    str(turn.metadata.get("raw_text") or "Agent task launched."),
+                ],
+                node_ids={turn.id},
+            )
+            cards.append(card)
+            task_cards.append(card)
+        return task_cards
 
     def _new_card(
         self,
@@ -487,6 +588,9 @@ class BoardBuilder:
 
     def _is_lead(self, agent: GraphNode) -> bool:
         return agent.label == "team-lead" or agent.metadata.get("agent_type") == "team-lead"
+
+    def _is_session_primary_agent(self, agent: GraphNode, session_id: str) -> bool:
+        return agent.id == f"agent:session:{session_id}"
 
     def _node_sort_key(self, node: GraphNode) -> tuple[str, str]:
         return (node.timestamp or "", node.id)
