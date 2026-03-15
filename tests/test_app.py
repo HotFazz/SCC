@@ -31,6 +31,9 @@ async def test_app_mounts_headlessly(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.query_one("#focus").value == "all"
+        assert len(app.query("#prompt")) == 0
+        assert len(app.query("#send")) == 0
+        assert len(app.query("#reload")) == 0
 
 
 @pytest.mark.anyio

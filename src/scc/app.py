@@ -8,11 +8,10 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Select, Static
+from textual.widgets import Footer, Header, ListItem, ListView, Select, Static
 from watchfiles import watch
 
 from scc.board_view import SwarmBoard
-from scc.claude_cli import ClaudeCLIClient, ClaudeCommandResult
 from scc.domain import GraphSnapshot, TimelineEvent
 from scc.loader import ClaudeStateLoader
 from scc.view import (
@@ -82,26 +81,10 @@ class SCCApp(App[None]):
       border: solid $warning;
       overflow-y: auto;
     }
-
-    #composer {
-      height: 3;
-      margin-top: 1;
-    }
-
-    #prompt {
-      width: 1fr;
-      margin-right: 1;
-    }
-
-    Button {
-      width: 12;
-      margin-left: 1;
-    }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "reload_data", "Reload"),
-        Binding("ctrl+l", "focus_prompt", "Prompt"),
     ]
 
     def __init__(self, claude_home: Path | str, workspace: Path | str) -> None:
@@ -109,7 +92,6 @@ class SCCApp(App[None]):
         self.claude_home = Path(claude_home).expanduser()
         self.workspace = Path(workspace).expanduser()
         self.loader = ClaudeStateLoader(self.claude_home)
-        self.claude = ClaudeCLIClient()
         self.snapshot = GraphSnapshot()
         self.focused_view = FocusedSnapshot(
             focus=FocusOption(label="All activity", value="all", timestamp=None),
@@ -119,7 +101,6 @@ class SCCApp(App[None]):
         self.selected_node_id: str | None = None
         self.focus_value = "all"
         self.status_line = "Loading Claude state..."
-        self.last_command_result: ClaudeCommandResult | None = None
         self._visible_events: list = []
         self._transcript_events: list[TimelineEvent] = []
         self._watch_stop = Event()
@@ -135,10 +116,6 @@ class SCCApp(App[None]):
             with Vertical(id="sidebar"):
                 yield ListView(id="timeline")
                 yield Static("Select a node or event to inspect details.", id="inspector", markup=False)
-        with Horizontal(id="composer"):
-            yield Input(placeholder="Send a prompt through Claude Code", id="prompt")
-            yield Button("Send", id="send")
-            yield Button("Reload", id="reload")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -153,9 +130,6 @@ class SCCApp(App[None]):
 
     def action_reload_data(self) -> None:
         self.load_snapshot()
-
-    def action_focus_prompt(self) -> None:
-        self.query_one("#prompt", Input).focus()
 
     @work(thread=True, exclusive=True, group="reload")
     def load_snapshot(self) -> None:
@@ -271,13 +245,8 @@ class SCCApp(App[None]):
             f"{self.focused_view.focus.label} | query flow | nodes {len(self.focused_view.snapshot.nodes)} | "
             f"edges {len(self.focused_view.snapshot.edges)} | messages {len(self._transcript_events)}",
             self.status_line,
+            f"workspace: {self.workspace}",
         ]
-        if self.last_command_result is not None:
-            state = "ok" if self.last_command_result.ok else "error"
-            text = self.last_command_result.display_text.replace("\n", " ")
-            lines.append(f"last prompt: {state} | {text[:120]}")
-        else:
-            lines.append(f"workspace: {self.workspace}")
         summary.update("\n".join(lines))
 
     def on_select_changed(self, event: Select.Changed[str]) -> None:
@@ -326,59 +295,3 @@ class SCCApp(App[None]):
                 "Select a Session focus to inspect a worker conversation."
             )
         return "No Claude Code transcript available for the current focus."
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "send":
-            self._submit_prompt()
-        if event.button.id == "reload":
-            self.action_reload_data()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "prompt":
-            self._submit_prompt()
-
-    def _submit_prompt(self) -> None:
-        prompt_widget = self.query_one("#prompt", Input)
-        prompt = prompt_widget.value.strip()
-        if not prompt:
-            self.status_line = "Prompt is empty."
-            self._render_summary()
-            return
-
-        prompt_widget.disabled = True
-        self.query_one("#send", Button).disabled = True
-        self.status_line = "Sending prompt to Claude Code..."
-        self._render_summary()
-        self.send_prompt(prompt, self._resume_session_id())
-
-    def _resume_session_id(self) -> str | None:
-        if self.selected_node_id and self.selected_node_id in self.focused_view.snapshot.nodes:
-            selected = self.focused_view.snapshot.nodes[self.selected_node_id]
-            if selected.session_id:
-                return selected.session_id
-        if self.focus_value.startswith("session:"):
-            return self.focus_value.split(":", 1)[1]
-        if self.focus_value.startswith("team:"):
-            team_node_id = self.focus_value
-            team_node = self.snapshot.nodes.get(team_node_id)
-            if team_node and team_node.session_id:
-                return team_node.session_id
-        return None
-
-    @work(thread=True, exclusive=True, group="claude")
-    def send_prompt(self, prompt: str, resume_session_id: str | None) -> None:
-        result = self.claude.send_prompt(prompt, workspace=self.workspace, resume_session_id=resume_session_id)
-        self.call_from_thread(self._handle_prompt_result, prompt, result)
-
-    def _handle_prompt_result(self, prompt: str, result: ClaudeCommandResult) -> None:
-        self.last_command_result = result
-        prompt_widget = self.query_one("#prompt", Input)
-        prompt_widget.value = ""
-        prompt_widget.disabled = False
-        prompt_widget.focus()
-        self.query_one("#send", Button).disabled = False
-        status = "Prompt completed." if result.ok else "Prompt failed."
-        session_text = f" session={result.session_id}" if result.session_id else ""
-        self.status_line = f"{status}{session_text}"
-        self._render_summary()
-        self.load_snapshot()
