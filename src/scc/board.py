@@ -31,6 +31,8 @@ class BoardCard:
     body_lines: list[str] = field(default_factory=list)
     node_ids: set[str] = field(default_factory=set)
     max_body_lines: int = 5
+    progress_lines: list[str] = field(default_factory=list)
+    preferred_node_id: str | None = None
 
 
 @dataclass(slots=True)

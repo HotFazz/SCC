@@ -9,9 +9,8 @@ from scc.domain import EdgeKind, GraphNode, GraphSnapshot, NodeKind, TimelineEve
 
 @dataclass(slots=True)
 class WorkerFlow:
-    task_card: BoardCard | None = None
-    worker_card: BoardCard | None = None
-    summary_card: BoardCard | None = None
+    card: BoardCard
+    completed: bool = False
 
 
 @dataclass(slots=True)
@@ -192,64 +191,65 @@ class QueryFlowBuilder:
         flows: list[WorkerFlow] = []
         synthetic_index = 0
         for worker in workers:
-            task_card = None
+            task_title = "Delegated task"
+            task_subtitle = "delegated"
+            task_node_ids: set[str] = set()
             task_node = tasks_by_worker.get(worker.id)
             if task_node is not None:
-                task_card = self._new_card(
-                    lane="tasks",
-                    title=str(task_node.metadata.get("subject") or task_node.label),
-                    subtitle=task_node.status or "active",
-                    body_lines=[str(task_node.metadata.get("description") or "Assigned task")],
-                    node_ids={task_node.id},
-                )
-                cards.append(task_card)
+                task_title = str(task_node.metadata.get("subject") or task_node.label)
+                task_subtitle = task_node.status or "active"
+                task_node_ids = {task_node.id}
             elif synthetic_index < len(agent_tasks):
                 task_turn = agent_tasks[synthetic_index]
                 synthetic_index += 1
-                task_card = self._new_card(
-                    lane="tasks",
-                    title=task_turn.label.split("Agent: ", 1)[1].strip(),
-                    subtitle="delegated",
-                    body_lines=["Spawned from this request"],
-                    node_ids={task_turn.id},
-                )
-                cards.append(task_card)
+                task_title = task_turn.label.split("Agent: ", 1)[1].strip()
+                task_subtitle = "delegated"
+                task_node_ids = {task_turn.id}
 
-            worker_card = self._new_card(
-                lane="workers",
-                title=self._display_worker_label(worker.label, len(flows) + 1),
-                subtitle=self._agent_subtitle(worker),
-                body_lines=self._worker_body_lines(worker, summary_text=worker_summaries.get(worker.id)),
-                node_ids={worker.id},
-            )
-            cards.append(worker_card)
-
-            summary_card = None
             summary_text = worker_summaries.get(worker.id)
-            if summary_text:
-                summary_card = self._new_card(
-                    lane="summaries",
-                    title="Progress",
-                    subtitle="latest worker output",
-                    body_lines=[summary_text],
-                    node_ids={worker.id},
-                )
-                cards.append(summary_card)
+            worker_node_ids = task_node_ids | {worker.id} | self._worker_turn_ids(
+                snapshot,
+                worker,
+                request.timestamp,
+                window_end,
+            )
+            flow_card = self._new_card(
+                lane="workers",
+                title=task_title,
+                subtitle=task_subtitle,
+                body_lines=[
+                    self._display_worker_label(worker.label, len(flows) + 1),
+                    self._agent_subtitle(worker),
+                ],
+                node_ids=worker_node_ids,
+                max_body_lines=2,
+                progress_lines=self._worker_progress_lines(
+                    snapshot,
+                    worker,
+                    request.timestamp,
+                    window_end,
+                    summary_text=summary_text,
+                ),
+                preferred_node_id=worker.id,
+            )
+            cards.append(flow_card)
 
-            flows.append(WorkerFlow(task_card=task_card, worker_card=worker_card, summary_card=summary_card))
+            flows.append(WorkerFlow(card=flow_card, completed=bool(summary_text)))
 
         while synthetic_index < len(agent_tasks):
             task_turn = agent_tasks[synthetic_index]
             synthetic_index += 1
-            task_card = self._new_card(
-                lane="tasks",
+            flow_card = self._new_card(
+                lane="workers",
                 title=task_turn.label.split("Agent: ", 1)[1].strip(),
                 subtitle="delegated",
-                body_lines=["Spawned from this request"],
+                body_lines=["Awaiting worker", "pending"],
                 node_ids={task_turn.id},
+                max_body_lines=2,
+                progress_lines=["Waiting for worker activity."],
             )
-            cards.append(task_card)
-            flows.append(WorkerFlow(task_card=task_card))
+            cards.append(flow_card)
+            flows.append(WorkerFlow(card=flow_card))
 
         return flows
 
@@ -306,6 +306,20 @@ class QueryFlowBuilder:
             if not self._in_window(turn.timestamp, window_start, window_end):
                 continue
             first_seen[worker.id] = min(first_seen.get(worker.id, turn.timestamp or "~"), turn.timestamp or "~")
+
+        for event in snapshot.sorted_timeline():
+            if (
+                event.source_node_id not in snapshot.nodes
+                or event.kind not in {"agent_progress", "hook_progress"}
+                or not self._in_window(event.timestamp, window_start, window_end)
+            ):
+                continue
+            worker = snapshot.nodes[event.source_node_id]
+            if worker.kind != NodeKind.AGENT:
+                continue
+            if primary is not None and worker.id == primary.id:
+                continue
+            first_seen[worker.id] = min(first_seen.get(worker.id, event.timestamp or "~"), event.timestamp or "~")
 
         ordered_ids = sorted(first_seen, key=lambda node_id: (first_seen[node_id], snapshot.nodes[node_id].label))
         return [snapshot.nodes[node_id] for node_id in ordered_ids]
@@ -370,6 +384,74 @@ class QueryFlowBuilder:
             if mailbox:
                 summaries[worker.id] = mailbox[-1]
         return summaries
+
+    def _worker_turn_ids(
+        self,
+        snapshot: GraphSnapshot,
+        worker: GraphNode,
+        window_start: str | None,
+        window_end: str | None,
+    ) -> set[str]:
+        node_ids: set[str] = set()
+        for edge in snapshot.edges:
+            if edge.kind != EdgeKind.PRODUCED or edge.source != worker.id or edge.target not in snapshot.nodes:
+                continue
+            turn = snapshot.nodes[edge.target]
+            if turn.kind == NodeKind.MODEL_TURN and self._in_window(turn.timestamp, window_start, window_end):
+                node_ids.add(turn.id)
+        return node_ids
+
+    def _worker_progress_lines(
+        self,
+        snapshot: GraphSnapshot,
+        worker: GraphNode,
+        window_start: str | None,
+        window_end: str | None,
+        summary_text: str | None,
+        limit: int = 12,
+    ) -> list[str]:
+        entries: list[tuple[str, str, str]] = []
+        for event in snapshot.sorted_timeline():
+            if (
+                event.source_node_id != worker.id
+                or event.kind not in {"agent_progress", "hook_progress", "mailbox_message"}
+                or not self._in_window(event.timestamp, window_start, window_end)
+            ):
+                continue
+            detail = self._summarize_text(event.detail or event.title)
+            if not detail:
+                continue
+            stamp = (event.timestamp or "--------")[11:19] if event.timestamp else "--------"
+            entries.append((event.timestamp or "", event.id, f"{stamp}  {detail}"))
+
+        for edge in snapshot.edges:
+            if edge.kind != EdgeKind.PRODUCED or edge.source != worker.id or edge.target not in snapshot.nodes:
+                continue
+            turn = snapshot.nodes[edge.target]
+            if turn.kind != NodeKind.MODEL_TURN or not self._in_window(turn.timestamp, window_start, window_end):
+                continue
+            detail = self._summarize_text(str(turn.metadata.get("raw_text") or turn.label).strip())
+            if not detail:
+                continue
+            stamp = (turn.timestamp or "--------")[11:19] if turn.timestamp else "--------"
+            entries.append((turn.timestamp or "", turn.id, f"{stamp}  {detail}"))
+
+        entries.sort()
+        lines: list[str] = []
+        for _timestamp, _key, line in entries:
+            if not lines or lines[-1] != line:
+                lines.append(line)
+
+        if summary_text:
+            summary_line = self._summarize_text(summary_text)
+            if summary_line:
+                done_line = f"done  {summary_line}"
+                if (not lines or lines[-1] != done_line) and (
+                    not lines or not lines[-1].endswith(summary_line)
+                ):
+                    lines.append(done_line)
+
+        return lines[-limit:] or ["Waiting for worker activity."]
 
     def _final_turn(self, lead_turns: list[GraphNode]) -> GraphNode | None:
         visible = [turn for turn in lead_turns if not turn.label.startswith("Agent: ")]
@@ -453,6 +535,8 @@ class QueryFlowBuilder:
         node_ids: set[str],
         card_id: str | None = None,
         max_body_lines: int = 5,
+        progress_lines: list[str] | None = None,
+        preferred_node_id: str | None = None,
     ) -> BoardCard:
         if card_id is None:
             prefix = {
@@ -473,6 +557,8 @@ class QueryFlowBuilder:
             body_lines=body_lines,
             node_ids=node_ids,
             max_body_lines=max_body_lines,
+            progress_lines=list(progress_lines or []),
+            preferred_node_id=preferred_node_id,
         )
 
     def _agent_subtitle(self, agent: GraphNode) -> str:
@@ -492,11 +578,11 @@ class QueryFlowBuilder:
         final_turn: GraphNode | None,
     ) -> list[str]:
         lines = [f"window: {request.timestamp[11:19] if request.timestamp else '---'}"]
-        delegated = sum(1 for flow in worker_flows if flow.worker_card is not None)
+        delegated = len(worker_flows)
         if delegated:
             noun = "worker" if delegated == 1 else "workers"
             lines.append(f"delegated to {delegated} {noun}")
-            completed = sum(1 for flow in worker_flows if flow.summary_card is not None)
+            completed = sum(1 for flow in worker_flows if flow.completed)
             lines.append(f"reports: {completed}/{delegated}")
             lines.extend(self._lead_activity_lines(lead_turns, final_turn, max_items=3))
         else:
@@ -537,13 +623,6 @@ class QueryFlowBuilder:
                 activity.append(summary)
 
         return activity[-max_items:]
-
-    def _worker_body_lines(self, worker: GraphNode, summary_text: str | None) -> list[str]:
-        if summary_text:
-            return ["reported progress"]
-        if worker.status:
-            return [worker.status]
-        return ["waiting for progress"]
 
     def _summarize_text(self, text: str, fallback: str = "") -> str:
         normalized = " ".join(text.split()).strip()

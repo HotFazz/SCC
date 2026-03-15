@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from scc.app import SCCApp
-from scc.board_view import BoardCardWidget
+from scc.board_view import BoardCardWidget, WorkerFlowWidget
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -194,7 +194,7 @@ async def test_app_keeps_lead_card_visible_under_request_in_session_focus(tmp_pa
 
         request_card = app.query_one("#card-Q1", BoardCardWidget)
         lead_card = app.query_one("#card-L1", BoardCardWidget)
-        worker_card = app.query_one("#card-W1", BoardCardWidget)
+        worker_card = app.query_one("#card-W1", WorkerFlowWidget)
 
         assert request_card.region.y < lead_card.region.y
         assert lead_card.region.y - request_card.region.y < 20

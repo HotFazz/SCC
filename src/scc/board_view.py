@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from textual import events, on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
@@ -104,6 +104,8 @@ class BoardCardWidget(Vertical):
 
     @property
     def preferred_node_id(self) -> str | None:
+        if self.card.preferred_node_id:
+            return self.card.preferred_node_id
         if not self.card.node_ids:
             return None
         return sorted(self.card.node_ids)[0]
@@ -125,27 +127,103 @@ class BoardCardWidget(Vertical):
 class WorkerFlowWidget(Vertical):
     DEFAULT_CSS = """
     WorkerFlowWidget {
-      width: 28;
-      min-width: 24;
-      max-width: 32;
+      width: 34;
+      min-width: 30;
+      max-width: 38;
       height: auto;
       margin-right: 1;
     }
 
-    WorkerFlowWidget > BoardCardWidget {
-      margin-bottom: 1;
+    WorkerFlowWidget {
+      padding: 1;
+      border: round #2563eb;
+      background: #0f1f39;
+    }
+
+    WorkerFlowWidget:hover {
+      background: #13274a;
+    }
+
+    WorkerFlowWidget.is-selected {
+      border: heavy $accent;
+      background: $boost;
+    }
+
+    WorkerFlowWidget .card-token {
+      color: $text-muted;
+      text-style: bold;
+    }
+
+    WorkerFlowWidget .task-title {
+      margin-top: 1;
+      text-style: bold;
+    }
+
+    WorkerFlowWidget .task-subtitle {
+      margin-top: 1;
+      color: $text-muted;
+    }
+
+    WorkerFlowWidget .worker-title {
+      margin-top: 1;
+      color: #7dd3fc;
+      text-style: bold;
+    }
+
+    WorkerFlowWidget .worker-subtitle {
+      margin-top: 1;
+      color: $text-muted;
+    }
+
+    WorkerFlowWidget .flow-log {
+      margin-top: 1;
+      height: 10;
+      max-height: 10;
+      border: round #15803d;
+      background: #0d2a18;
+      overflow-y: auto;
+      padding: 0 1;
+    }
+
+    WorkerFlowWidget .flow-line {
+      margin-top: 1;
+      color: $text;
     }
     """
 
     def __init__(self, flow: WorkerFlow, selected_card_id: str | None) -> None:
-        super().__init__(classes="worker-flow")
+        classes = "worker-flow"
+        if selected_card_id == flow.card.card_id:
+            classes += " is-selected"
+        super().__init__(classes=classes, id=f"card-{flow.card.card_id}")
         self.flow = flow
         self.selected_card_id = selected_card_id
 
+    @property
+    def preferred_node_id(self) -> str | None:
+        if self.flow.card.preferred_node_id:
+            return self.flow.card.preferred_node_id
+        if not self.flow.card.node_ids:
+            return None
+        return sorted(self.flow.card.node_ids)[0]
+
     def compose(self) -> ComposeResult:
-        for card in (self.flow.task_card, self.flow.worker_card, self.flow.summary_card):
-            if card is not None:
-                yield BoardCardWidget(card, selected=self.selected_card_id == card.card_id)
+        yield Static(self.flow.card.card_id, classes="card-token")
+        yield Static(self.flow.card.title, classes="task-title")
+        if self.flow.card.subtitle:
+            yield Static(self.flow.card.subtitle, classes="task-subtitle")
+        if self.flow.card.body_lines:
+            yield Static(self.flow.card.body_lines[0], classes="worker-title")
+        if len(self.flow.card.body_lines) > 1:
+            yield Static(self.flow.card.body_lines[1], classes="worker-subtitle")
+        with VerticalScroll(classes="flow-log"):
+            for line in self.flow.card.progress_lines:
+                yield Static(line, classes="flow-line", markup=False)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if self.preferred_node_id:
+            self.post_message(BoardCardWidget.Selected(self.preferred_node_id))
 
 
 class QuerySectionWidget(Vertical):

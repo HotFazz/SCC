@@ -92,11 +92,10 @@ def test_query_flow_groups_requests_into_scroll_sections() -> None:
     assert model.title.startswith("session ")
     assert len(model.sections) == 2
     assert model.sections[0].request_card.title == "You"
-    assert model.sections[0].worker_flows[0].task_card is not None
-    assert model.sections[0].worker_flows[0].worker_card is not None
-    assert model.sections[0].worker_flows[0].summary_card is not None
-    assert model.sections[0].worker_flows[0].worker_card.body_lines == ["reported progress"]
-    assert model.sections[0].worker_flows[0].summary_card.body_lines == ["Repo structure complete."]
+    assert model.sections[0].worker_flows[0].card.title == "Explore repo structure"
+    assert model.sections[0].worker_flows[0].card.body_lines == ["worker-1", "agent"]
+    assert model.sections[0].worker_flows[0].card.progress_lines == ["10:00:03  Repo structure complete."]
+    assert model.sections[0].worker_flows[0].completed is True
     assert model.sections[0].lead_card is not None
     assert model.sections[0].lead_card.max_body_lines == 8
     assert model.sections[0].lead_card.body_lines == [

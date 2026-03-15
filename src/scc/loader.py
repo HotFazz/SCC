@@ -274,6 +274,9 @@ class ClaudeStateLoader:
     def _load_main_transcript(self, snapshot: GraphSnapshot, transcript_path: Path) -> None:
         for record in self._read_jsonl(snapshot, transcript_path):
             record_type = record.get("type")
+            if record_type == "progress":
+                self._load_progress_record(snapshot, record, team_hint=record.get("teamName"))
+                continue
             if record_type not in {"user", "assistant"}:
                 continue
 
@@ -403,6 +406,9 @@ class ClaudeStateLoader:
 
         for record in records:
             record_type = record.get("type")
+            if record_type == "progress":
+                self._load_progress_record(snapshot, record, team_hint=team_name)
+                continue
             if record_type not in {"user", "assistant"}:
                 continue
             if record_type == "user" and self._should_skip_user_record(record):
@@ -483,6 +489,34 @@ class ClaudeStateLoader:
                     )
                 )
 
+    def _load_progress_record(
+        self,
+        snapshot: GraphSnapshot,
+        record: dict[str, Any],
+        team_hint: str | None,
+    ) -> None:
+        detail = self._detail_for_progress_record(record)
+        if not detail:
+            return
+
+        agent_node_id = self._agent_for_progress_record(snapshot, record, team_hint)
+        if not agent_node_id:
+            return
+
+        snapshot.add_event(
+            TimelineEvent(
+                id=f"progress:{record.get('uuid', agent_node_id)}",
+                timestamp=record.get("timestamp"),
+                kind=str(record.get("data", {}).get("type") or "progress"),
+                title=self._summarize_text(detail, fallback="Progress"),
+                detail=detail,
+                source_node_id=agent_node_id,
+                team=team_hint or self._cluster_for_agent(snapshot, agent_node_id),
+                session_id=record.get("sessionId"),
+                metadata={"is_sidechain": bool(record.get("isSidechain"))},
+            )
+        )
+
     def _add_turn_node(
         self,
         snapshot: GraphSnapshot,
@@ -526,6 +560,28 @@ class ClaudeStateLoader:
                     GraphEdge(source=parent_node_id, target=node_id, kind=EdgeKind.PARENT)
                 )
         return node_id
+
+    def _agent_for_progress_record(
+        self,
+        snapshot: GraphSnapshot,
+        record: dict[str, Any],
+        team_hint: str | None,
+    ) -> str | None:
+        data = record.get("data", {})
+        runtime_agent_id = None
+        if isinstance(data, dict):
+            runtime_agent_id = data.get("agentId")
+        runtime_agent_id = runtime_agent_id or record.get("agentId")
+        session_id = record.get("sessionId")
+        if runtime_agent_id:
+            return self._ensure_runtime_agent(
+                snapshot,
+                team_name=team_hint,
+                runtime_agent_id=runtime_agent_id,
+                session_id=session_id,
+                label=runtime_agent_id,
+            )
+        return self._agent_for_record(snapshot, record, team_hint=team_hint)
 
     def _agent_for_record(
         self,
@@ -806,6 +862,45 @@ class ClaudeStateLoader:
                 return text
         text = self._clean_message_text(self._raw_message_text(message))
         return text or "Assistant response"
+
+    def _detail_for_progress_record(self, record: dict[str, Any]) -> str:
+        data = record.get("data", {})
+        if not isinstance(data, dict):
+            return ""
+
+        if data.get("type") == "hook_progress":
+            hook = str(data.get("hookName") or data.get("hookEvent") or "").strip()
+            command = str(data.get("command") or "").strip()
+            if hook and command:
+                return f"{hook} ({command})"
+            return hook or command
+
+        if data.get("type") != "agent_progress":
+            return ""
+
+        message = data.get("message", {})
+        if not isinstance(message, dict):
+            return self._summarize_text(str(data.get("prompt") or ""), fallback="")
+
+        message_type = message.get("type")
+        nested_message = message.get("message")
+        if message_type == "assistant" and isinstance(nested_message, dict):
+            detail = self._detail_for_assistant_record({"message": nested_message})
+            if detail and detail not in {"Assistant response", "Agent", "Bash", "Glob", "Read", "Task", "TaskList"}:
+                return detail
+            return self._label_for_assistant_record({"message": nested_message})
+
+        if message_type == "user" and isinstance(nested_message, dict):
+            content = nested_message.get("content")
+            if isinstance(content, list) and any(
+                isinstance(item, dict) and item.get("type") == "tool_result"
+                for item in content
+            ):
+                return ""
+            prompt = self._clean_message_text(self._raw_message_text(nested_message))
+            return self._summarize_text(prompt, fallback="")
+
+        return self._summarize_text(str(data.get("prompt") or ""), fallback="")
 
     def _raw_message_text(self, message: Any) -> str:
         if isinstance(message, dict):

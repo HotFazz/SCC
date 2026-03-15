@@ -169,6 +169,56 @@ def test_loader_builds_graph_from_team_files_and_transcripts(tmp_path: Path) -> 
     assert any(event.detail == "The repository structure is clear." for event in transcript_events)
 
 
+def test_loader_keeps_agent_progress_events_for_worker_streams(tmp_path: Path) -> None:
+    claude_home = tmp_path / ".claude"
+    write_jsonl(
+        claude_home / "projects/workspace/session-1.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "user-1",
+                "parentUuid": None,
+                "sessionId": "session-1",
+                "timestamp": "2026-03-14T09:59:00Z",
+                "cwd": "/tmp/demo",
+                "message": {"role": "user", "content": "Inspect the repo."},
+            },
+            {
+                "type": "progress",
+                "uuid": "progress-1",
+                "sessionId": "session-1",
+                "timestamp": "2026-03-14T09:59:10Z",
+                "cwd": "/tmp/demo",
+                "data": {
+                    "type": "agent_progress",
+                    "agentId": "runtime-worker",
+                    "prompt": "Explore the source tree.",
+                    "message": {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "name": "Bash",
+                                    "input": {"description": "List files"},
+                                }
+                            ],
+                        },
+                    },
+                },
+            },
+        ],
+    )
+
+    snapshot = ClaudeStateLoader(claude_home).load()
+
+    progress_events = [event for event in snapshot.timeline if event.kind == "agent_progress"]
+    assert len(progress_events) == 1
+    assert progress_events[0].source_node_id == "agent:runtime:runtime-worker"
+    assert progress_events[0].detail == "Bash: List files"
+
+
 def test_loader_reuses_cached_team_state_on_partial_write(tmp_path: Path) -> None:
     claude_home = tmp_path / ".claude"
     config_path = claude_home / "teams/demo/config.json"
