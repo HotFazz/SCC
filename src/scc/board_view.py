@@ -6,7 +6,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
-from scc.board import BoardCard
+from scc.board import BoardCard, BoardMilestone
 from scc.domain import GraphSnapshot
 from scc.query_flow import QueryFlowBuilder, QueryFlowModel, QuerySection, WorkerFlow
 
@@ -175,6 +175,11 @@ class WorkerFlowWidget(Vertical):
       color: $text-muted;
     }
 
+    WorkerFlowWidget .milestone-stack {
+      margin-top: 1;
+      height: auto;
+    }
+
     WorkerFlowWidget .flow-log {
       margin-top: 1;
       height: 10;
@@ -216,6 +221,10 @@ class WorkerFlowWidget(Vertical):
             yield Static(self.flow.card.body_lines[0], classes="worker-title")
         if len(self.flow.card.body_lines) > 1:
             yield Static(self.flow.card.body_lines[1], classes="worker-subtitle")
+        if self.flow.card.milestones:
+            with Vertical(classes="milestone-stack"):
+                for milestone in self.flow.card.milestones:
+                    yield MilestoneWidget(milestone)
         with VerticalScroll(classes="flow-log"):
             for line in self.flow.card.progress_lines:
                 yield Static(line, classes="flow-line", markup=False)
@@ -224,6 +233,67 @@ class WorkerFlowWidget(Vertical):
         event.stop()
         if self.preferred_node_id:
             self.post_message(BoardCardWidget.Selected(self.preferred_node_id))
+
+
+class MilestoneWidget(Vertical):
+    DEFAULT_CSS = """
+    MilestoneWidget {
+      height: auto;
+      margin-top: 1;
+      padding: 0 1;
+      border: round #2d5a9b;
+      background: #102341;
+    }
+
+    MilestoneWidget.kind-assignment {
+      border: round #3b82f6;
+      background: #10203a;
+    }
+
+    MilestoneWidget.kind-progress {
+      border: round #2563eb;
+      background: #102341;
+    }
+
+    MilestoneWidget.kind-hook {
+      border: round #7c3aed;
+      background: #20153d;
+    }
+
+    MilestoneWidget.kind-report {
+      border: round #16a34a;
+      background: #0f2b18;
+    }
+
+    MilestoneWidget.kind-complete {
+      border: round #15803d;
+      background: #12331d;
+    }
+
+    MilestoneWidget .milestone-token {
+      color: $text-muted;
+      text-style: bold;
+    }
+
+    MilestoneWidget .milestone-title {
+      text-style: bold;
+    }
+
+    MilestoneWidget .milestone-subtitle {
+      color: $text-muted;
+    }
+    """
+
+    def __init__(self, milestone: BoardMilestone) -> None:
+        super().__init__(classes=f"milestone kind-{milestone.kind}")
+        self.milestone = milestone
+
+    def compose(self) -> ComposeResult:
+        if self.milestone.timestamp:
+            yield Static(self.milestone.timestamp, classes="milestone-token")
+        yield Static(self.milestone.title, classes="milestone-title")
+        if self.milestone.subtitle:
+            yield Static(self.milestone.subtitle, classes="milestone-subtitle")
 
 
 class QuerySectionWidget(Vertical):

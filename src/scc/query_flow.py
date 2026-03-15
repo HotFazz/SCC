@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from scc.board import BoardCard
+from scc.board import BoardCard, BoardMilestone
 from scc.domain import EdgeKind, GraphNode, GraphSnapshot, NodeKind, TimelineEvent
 
 
@@ -224,6 +224,13 @@ class QueryFlowBuilder:
                 node_ids=worker_node_ids,
                 max_body_lines=2,
                 progress_lines=self._worker_progress_lines(
+                    snapshot,
+                    worker,
+                    request.timestamp,
+                    window_end,
+                    summary_text=summary_text,
+                ),
+                milestones=self._worker_milestones(
                     snapshot,
                     worker,
                     request.timestamp,
@@ -453,6 +460,98 @@ class QueryFlowBuilder:
 
         return lines[-limit:] or ["Waiting for worker activity."]
 
+    def _worker_milestones(
+        self,
+        snapshot: GraphSnapshot,
+        worker: GraphNode,
+        window_start: str | None,
+        window_end: str | None,
+        summary_text: str | None,
+        limit: int = 4,
+    ) -> list[BoardMilestone]:
+        milestones: list[tuple[str, str, BoardMilestone]] = []
+        for event in snapshot.sorted_timeline():
+            if (
+                event.source_node_id != worker.id
+                or event.kind not in {"agent_progress", "hook_progress", "mailbox_message"}
+                or not self._in_window(event.timestamp, window_start, window_end)
+            ):
+                continue
+            milestone = self._milestone_for_event(event)
+            if milestone is None:
+                continue
+            sort_key = event.timestamp or ""
+            dedupe_key = "|".join(
+                [
+                    milestone.kind,
+                    milestone.title,
+                    milestone.subtitle or "",
+                    milestone.timestamp or "",
+                ]
+            )
+            milestones.append((sort_key, dedupe_key, milestone))
+
+        if summary_text:
+            summary = self._summarize_text(summary_text)
+            if summary:
+                milestones.append(
+                    (
+                        "~",
+                        f"complete|{summary}",
+                        BoardMilestone(
+                            kind="complete",
+                            title="Summary delivered",
+                            subtitle=summary,
+                            timestamp="done",
+                        ),
+                    )
+                )
+
+        milestones.sort(key=lambda item: item[0])
+        selected: list[BoardMilestone] = []
+        seen: set[str] = set()
+        for _sort_key, dedupe_key, milestone in milestones:
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            selected.append(milestone)
+
+        return selected[-limit:]
+
+    def _milestone_for_event(self, event: TimelineEvent) -> BoardMilestone | None:
+        stamp = (event.timestamp or "--------")[11:19] if event.timestamp else None
+        detail = self._summarize_text(event.detail or event.title)
+        if event.kind == "mailbox_message":
+            return BoardMilestone(
+                kind="report",
+                title="Reported to lead",
+                subtitle=detail or None,
+                timestamp=stamp,
+            )
+        if event.kind == "hook_progress" and detail:
+            return BoardMilestone(
+                kind="hook",
+                title=detail,
+                timestamp=stamp,
+            )
+        if event.kind != "agent_progress":
+            return None
+
+        message_type = str(event.metadata.get("progress_message_type") or "").strip()
+        if message_type == "user":
+            return BoardMilestone(
+                kind="assignment",
+                title="Task received",
+                timestamp=stamp,
+            )
+        if detail:
+            return BoardMilestone(
+                kind="progress",
+                title=detail,
+                timestamp=stamp,
+            )
+        return None
+
     def _final_turn(self, lead_turns: list[GraphNode]) -> GraphNode | None:
         visible = [turn for turn in lead_turns if not turn.label.startswith("Agent: ")]
         return visible[-1] if visible else None
@@ -537,6 +636,7 @@ class QueryFlowBuilder:
         max_body_lines: int = 5,
         progress_lines: list[str] | None = None,
         preferred_node_id: str | None = None,
+        milestones: list[BoardMilestone] | None = None,
     ) -> BoardCard:
         if card_id is None:
             prefix = {
@@ -559,6 +659,7 @@ class QueryFlowBuilder:
             max_body_lines=max_body_lines,
             progress_lines=list(progress_lines or []),
             preferred_node_id=preferred_node_id,
+            milestones=list(milestones or []),
         )
 
     def _agent_subtitle(self, agent: GraphNode) -> str:

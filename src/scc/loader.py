@@ -513,7 +513,10 @@ class ClaudeStateLoader:
                 source_node_id=agent_node_id,
                 team=team_hint or self._cluster_for_agent(snapshot, agent_node_id),
                 session_id=record.get("sessionId"),
-                metadata={"is_sidechain": bool(record.get("isSidechain"))},
+                metadata={
+                    "is_sidechain": bool(record.get("isSidechain")),
+                    "progress_message_type": self._progress_message_type(record),
+                },
             )
         )
 
@@ -901,6 +904,15 @@ class ClaudeStateLoader:
             return self._summarize_text(prompt, fallback="")
 
         return self._summarize_text(str(data.get("prompt") or ""), fallback="")
+
+    def _progress_message_type(self, record: dict[str, Any]) -> str:
+        data = record.get("data", {})
+        if not isinstance(data, dict):
+            return ""
+        message = data.get("message", {})
+        if not isinstance(message, dict):
+            return ""
+        return str(message.get("type") or "").strip()
 
     def _raw_message_text(self, message: Any) -> str:
         if isinstance(message, dict):

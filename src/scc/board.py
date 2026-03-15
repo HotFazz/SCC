@@ -23,6 +23,14 @@ LANE_PREFIXES = {
 
 
 @dataclass(slots=True)
+class BoardMilestone:
+    kind: str
+    title: str
+    subtitle: str | None = None
+    timestamp: str | None = None
+
+
+@dataclass(slots=True)
 class BoardCard:
     card_id: str
     lane: str
@@ -33,6 +41,7 @@ class BoardCard:
     max_body_lines: int = 5
     progress_lines: list[str] = field(default_factory=list)
     preferred_node_id: str | None = None
+    milestones: list[BoardMilestone] = field(default_factory=list)
 
 
 @dataclass(slots=True)
