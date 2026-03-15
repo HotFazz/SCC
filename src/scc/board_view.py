@@ -221,13 +221,13 @@ class WorkerFlowWidget(Vertical):
             yield Static(self.flow.card.body_lines[0], classes="worker-title")
         if len(self.flow.card.body_lines) > 1:
             yield Static(self.flow.card.body_lines[1], classes="worker-subtitle")
+        with VerticalScroll(classes="flow-log"):
+            for line in self.flow.card.progress_lines:
+                yield Static(line, classes="flow-line", markup=False)
         if self.flow.card.milestones:
             with Vertical(classes="milestone-stack"):
                 for milestone in self.flow.card.milestones:
                     yield MilestoneWidget(milestone)
-        with VerticalScroll(classes="flow-log"):
-            for line in self.flow.card.progress_lines:
-                yield Static(line, classes="flow-line", markup=False)
 
     def on_click(self, event: events.Click) -> None:
         event.stop()

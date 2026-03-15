@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from textual.containers import VerticalScroll
 
 from scc.app import SCCApp
 from scc.board_view import BoardCardWidget, MilestoneWidget, WorkerFlowWidget
@@ -195,13 +196,14 @@ async def test_app_keeps_lead_card_visible_under_request_in_session_focus(tmp_pa
         request_card = app.query_one("#card-Q1", BoardCardWidget)
         lead_card = app.query_one("#card-L1", BoardCardWidget)
         worker_card = app.query_one("#card-W1", WorkerFlowWidget)
-        milestones = worker_card.query(MilestoneWidget)
+        log_box = worker_card.query_one(".flow-log", VerticalScroll)
+        milestone = worker_card.query_one(MilestoneWidget)
 
         assert request_card.region.y < lead_card.region.y
         assert lead_card.region.y - request_card.region.y < 20
         assert lead_card.region.height > request_card.region.height
         assert worker_card.region.y - request_card.region.y < 30
-        assert len(list(milestones)) >= 1
+        assert log_box.region.y < milestone.region.y
 
 
 @pytest.mark.anyio
