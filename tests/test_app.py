@@ -200,3 +200,50 @@ async def test_app_keeps_lead_card_visible_under_request_in_session_focus(tmp_pa
         assert lead_card.region.y - request_card.region.y < 20
         assert lead_card.region.height > request_card.region.height
         assert worker_card.region.y - request_card.region.y < 30
+
+
+@pytest.mark.anyio
+async def test_app_preserves_selected_focus_across_snapshot_reload(tmp_path: Path) -> None:
+    claude_home = tmp_path / ".claude"
+    write_jsonl(
+        claude_home / "projects/workspace/session-1.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "user-1",
+                "parentUuid": None,
+                "sessionId": "session-1",
+                "timestamp": "2026-03-14T09:59:00Z",
+                "cwd": "/tmp/demo",
+                "message": {"role": "user", "content": "First"},
+            }
+        ],
+    )
+    write_jsonl(
+        claude_home / "projects/workspace/session-2.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "user-2",
+                "parentUuid": None,
+                "sessionId": "session-2",
+                "timestamp": "2026-03-14T10:00:00Z",
+                "cwd": "/tmp/demo",
+                "message": {"role": "user", "content": "Second"},
+            }
+        ],
+    )
+
+    app = SCCApp(claude_home=claude_home, workspace=tmp_path)
+    async with app.run_test(size=(180, 48)) as pilot:
+        await pilot.pause()
+        focus = app.query_one("#focus")
+        focus.value = "session:session-1"
+        await pilot.pause()
+        assert app.focus_value == "session:session-1"
+
+        app._apply_snapshot(app.loader.load())
+        await pilot.pause()
+
+        assert app.focus_value == "session:session-1"
+        assert focus.value == "session:session-1"

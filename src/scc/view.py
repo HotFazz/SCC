@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scc.domain import GraphSnapshot, NodeKind, TimelineEvent
+from scc.domain import EdgeKind, GraphNode, GraphSnapshot, NodeKind, TimelineEvent
 
 
 @dataclass(slots=True)
@@ -112,7 +112,7 @@ def build_focus_options(snapshot: GraphSnapshot) -> list[FocusOption]:
 def focus_snapshot(
     snapshot: GraphSnapshot,
     focus_value: str,
-    turn_limit: int = 80,
+    turn_limit: int = 240,
     event_limit: int = 140,
 ) -> FocusedSnapshot:
     focus = next(
@@ -205,11 +205,7 @@ def _clone_snapshot(
 
 
 def _trim_turn_nodes(snapshot: GraphSnapshot, node_ids: set[str], turn_limit: int) -> set[str]:
-    protected_turn_ids = {
-        node_id
-        for node_id in node_ids
-        if _should_preserve_turn(snapshot.nodes[node_id])
-    }
+    protected_turn_ids = _protected_turn_ids(snapshot, node_ids)
     turn_ids = [
         node_id
         for node_id in node_ids
@@ -228,6 +224,35 @@ def _trim_turn_nodes(snapshot: GraphSnapshot, node_ids: set[str], turn_limit: in
     }
     keep_turns.update(protected_turn_ids)
     return {node_id for node_id in node_ids if node_id not in turn_ids or node_id in keep_turns}
+
+
+def _protected_turn_ids(snapshot: GraphSnapshot, node_ids: set[str]) -> set[str]:
+    protected = {
+        node_id
+        for node_id in node_ids
+        if _should_preserve_turn(snapshot.nodes[node_id])
+    }
+    protected.update(_latest_agent_turn_ids(snapshot, node_ids))
+    return protected
+
+
+def _latest_agent_turn_ids(snapshot: GraphSnapshot, node_ids: set[str]) -> set[str]:
+    latest_by_agent: dict[str, GraphNode] = {}
+    for edge in snapshot.edges:
+        if (
+            edge.kind != EdgeKind.PRODUCED
+            or edge.source not in snapshot.nodes
+            or edge.target not in node_ids
+        ):
+            continue
+        agent = snapshot.nodes[edge.source]
+        turn = snapshot.nodes[edge.target]
+        if agent.kind != NodeKind.AGENT or turn.kind != NodeKind.MODEL_TURN:
+            continue
+        current = latest_by_agent.get(edge.source)
+        if current is None or (turn.timestamp or "", turn.id) > (current.timestamp or "", current.id):
+            latest_by_agent[edge.source] = turn
+    return {turn.id for turn in latest_by_agent.values()}
 
 
 def _expand_session_context(snapshot: GraphSnapshot, seed: set[str]) -> set[str]:
@@ -258,4 +283,10 @@ def _latest(current: str | None, candidate: str | None) -> str | None:
 
 
 def _should_preserve_turn(node: GraphNode) -> bool:
-    return node.kind == NodeKind.MODEL_TURN and node.label.startswith("Agent: ")
+    if node.kind == NodeKind.MODEL_TURN:
+        return node.label.startswith("Agent: ")
+    return (
+        node.kind == NodeKind.USER_REQUEST
+        and not node.metadata.get("is_sidechain")
+        and str(node.metadata.get("speaker") or "You") == "You"
+    )

@@ -178,3 +178,89 @@ def test_trim_turn_nodes_preserves_swarm_agent_launches() -> None:
     focused = focus_snapshot(snapshot, f"session:{session_id}", turn_limit=20)
 
     assert "turn:0" in focused.snapshot.nodes
+
+
+def test_trim_turn_nodes_preserves_top_level_requests_and_latest_worker_turns() -> None:
+    snapshot = GraphSnapshot()
+    session_id = "session-1"
+    snapshot.upsert_node(
+        GraphNode(
+            id="agent:session:session-1",
+            kind=NodeKind.AGENT,
+            label="claude",
+            session_id=session_id,
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="agent:runtime:worker-1",
+            kind=NodeKind.AGENT,
+            label="worker-1",
+            session_id=session_id,
+            agent_id="worker-1",
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="turn:user-1",
+            kind=NodeKind.USER_REQUEST,
+            label="First query",
+            session_id=session_id,
+            timestamp="2026-03-15T10:00:00Z",
+            metadata={"speaker": "You"},
+        )
+    )
+    snapshot.upsert_node(
+        GraphNode(
+            id="turn:user-2",
+            kind=NodeKind.USER_REQUEST,
+            label="Second query",
+            session_id=session_id,
+            timestamp="2026-03-15T10:20:00Z",
+            metadata={"speaker": "You"},
+        )
+    )
+
+    for index in range(24):
+        node = GraphNode(
+            id=f"turn:lead-{index}",
+            kind=NodeKind.MODEL_TURN,
+            label=f"Turn {index}",
+            session_id=session_id,
+            timestamp=f"2026-03-15T10:{index:02d}:30Z",
+        )
+        snapshot.upsert_node(node)
+        snapshot.add_edge(
+            GraphEdge(
+                source="agent:session:session-1",
+                target=node.id,
+                kind=EdgeKind.PRODUCED,
+            )
+        )
+
+    for node_id, timestamp, label in (
+        ("turn:worker-old", "2026-03-15T10:05:00Z", "Initial worker progress"),
+        ("turn:worker-new", "2026-03-15T10:25:00Z", "Latest worker progress"),
+    ):
+        snapshot.upsert_node(
+            GraphNode(
+                id=node_id,
+                kind=NodeKind.MODEL_TURN,
+                label=label,
+                session_id=session_id,
+                timestamp=timestamp,
+            )
+        )
+        snapshot.add_edge(
+            GraphEdge(
+                source="agent:runtime:worker-1",
+                target=node_id,
+                kind=EdgeKind.PRODUCED,
+            )
+        )
+
+    focused = focus_snapshot(snapshot, f"session:{session_id}", turn_limit=8)
+
+    assert "turn:user-1" in focused.snapshot.nodes
+    assert "turn:user-2" in focused.snapshot.nodes
+    assert "turn:worker-new" in focused.snapshot.nodes

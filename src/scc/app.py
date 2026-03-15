@@ -123,6 +123,7 @@ class SCCApp(App[None]):
         self._visible_events: list = []
         self._transcript_events: list[TimelineEvent] = []
         self._watch_stop = Event()
+        self._updating_focus_select = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -182,15 +183,19 @@ class SCCApp(App[None]):
         self.snapshot = snapshot
         options = build_focus_options(snapshot)
         select = self.query_one("#focus", Select)
-        if not options:
-            select.set_options([("All activity", "all")])
-            self.focus_value = "all"
-        else:
-            select.set_options([(option.label, option.value) for option in options])
-            valid_values = {option.value for option in options}
-            if self.focus_value not in valid_values:
-                self.focus_value = options[0].value
-        select.value = self.focus_value
+        self._updating_focus_select = True
+        try:
+            if not options:
+                select.set_options([("All activity", "all")])
+                self.focus_value = "all"
+            else:
+                select.set_options([(option.label, option.value) for option in options])
+                valid_values = {option.value for option in options}
+                if self.focus_value not in valid_values:
+                    self.focus_value = options[0].value
+            select.value = self.focus_value
+        finally:
+            self._updating_focus_select = False
         self._refresh_focus()
 
     def _refresh_focus(self) -> None:
@@ -276,7 +281,7 @@ class SCCApp(App[None]):
         summary.update("\n".join(lines))
 
     def on_select_changed(self, event: Select.Changed[str]) -> None:
-        if event.select.id != "focus" or event.value is None:
+        if self._updating_focus_select or event.select.id != "focus" or event.value is None:
             return
         self.focus_value = str(event.value)
         self._refresh_focus()
