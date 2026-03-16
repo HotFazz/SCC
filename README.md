@@ -1,4 +1,4 @@
-# SCC
+# Swarm Central Control
 
 Swarm Central Control is a terminal monitor for Claude Code teams and sidechain
 agents. It treats Claude Code as the execution engine and source of truth, then
