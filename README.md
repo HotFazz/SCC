@@ -27,6 +27,9 @@ that Claude persists on disk.
   - inspector pane
   - prompt bar that shells out to Claude Code instead of reimplementing it
 
+<img width="1670" height="1117" alt="image" src="https://github.com/user-attachments/assets/25a9ff0b-b036-4c2d-bcb9-54c0aad903bf" />
+
+
 ## Architecture
 
 - `ClaudeStateLoader`: ingests persisted Claude artifacts and builds a normalized
