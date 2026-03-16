@@ -5,6 +5,8 @@ agents. It treats Claude Code as the execution engine and source of truth, then
 builds a graph-oriented view on top of the session, task, and team artifacts
 that Claude persists on disk.
 
+<img width="1670" height="1117" alt="image" src="https://github.com/user-attachments/assets/25a9ff0b-b036-4c2d-bcb9-54c0aad903bf" />
+
 ## Goals
 
 - Visualize single-agent and multi-agent Claude sessions as a graph.
@@ -27,7 +29,6 @@ that Claude persists on disk.
   - inspector pane
   - prompt bar that shells out to Claude Code instead of reimplementing it
 
-<img width="1670" height="1117" alt="image" src="https://github.com/user-attachments/assets/25a9ff0b-b036-4c2d-bcb9-54c0aad903bf" />
 
 
 ## Architecture
